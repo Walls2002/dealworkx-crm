@@ -1,0 +1,29 @@
+---
+name: DealWorkx CRM
+description: A copy of the user's "JV Outreach" CRM reference, built on shadcn/ui.
+system: "shadcn/ui (radix-nova), Tailwind v4, Inter, primary blue oklch(0.585 0.195 258)"
+---
+
+# DealWorkx CRM design
+
+On 2026-11-17 the user asked to copy a reference screenshot (a "JV Outreach" CRM). Match it; don't reinterpret it.
+
+## Shell
+- **Sidebar** (`components/app-sidebar.tsx`), light grey: the DX mark with "DealWorkx / Team CRM", a "Menu" label, then exactly the
+  7 old tabs (Console, Lead List, Interested Leads, Email Requested, Recorded Call History, Call Pipeline, Daily Dashboard),
+  each 36px with 13px text. The active item is light blue with blue text, and counts sit on the right. A bordered user card at the
+  bottom opens the account menu (Sequence, Import, Sign out).
+- **Top bar** (`components/site-header.tsx`), 56px: page title, search (Ctrl K), refresh, avatar + name + chevron (same menu).
+
+## Page anatomy (`components/page.tsx`)
+1. `Toolbar`: `SearchBox` on the left; `FilterSelect`s, a "Jump to" dropdown and the blue primary button on the right.
+2. `StatGrid` of three `StatCard`s: a coloured 28px icon tile, title, a "…" menu with one real link, a big number and one line of
+   context. Only real data; no invented trends.
+3. `Segments`: grey segmented tabs (white active segment), used for task status, lead status, follow-up lists and call outcomes.
+4. `DataTable`: a bordered rounded table with `TH` uppercase 11px headers, 48px rows, a small avatar with a single-line name,
+   `Pill` badges (grey with a coloured dot; tinted red or amber for overdue / today), and a `RowActions` column (call, Gmail,
+   "…" menu with Details, Call history and LinkedIn).
+5. `Pager`: Previous on the left, numbered pages in the middle (active page blue), Next on the right.
+
+## Lead record
+A right-hand shadcn `Sheet` (`components/lead-sheet.tsx`, up to `max-w-xl`) driven by the `?lead=` parameter.

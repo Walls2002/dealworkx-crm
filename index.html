@@ -1,0 +1,298 @@
+<!doctype html><html><head><base target="_top"><meta charset="utf-8"><style>
+:root{font:15px Arial,sans-serif;color:#173d63;background:#f3f5f7}*{box-sizing:border-box}body{margin:0}header{background:#173d63;color:white;padding:24px 5%;display:flex;justify-content:space-between;gap:20px;align-items:center}h1{font-size:24px;margin:0}header p{margin:7px 0 0;color:#c4ded4}main{max-width:1450px;margin:auto;padding:24px}nav,.filters,.actions{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:18px}button,input,select{font:inherit;border:1px solid #bdcad5;border-radius:7px;padding:11px}button{background:#173d63;color:white;font-weight:bold;cursor:pointer}button.secondary{background:white;color:#173d63}button:disabled{opacity:.45;cursor:not-allowed}input{min-width:160px}input[type=checkbox]{min-width:0}label{display:flex;flex-direction:column;gap:6px;font-size:13px}.panel,.card{background:white;border:1px solid #dee5e9;border-radius:12px;padding:20px;margin-bottom:16px}.scroll{overflow:auto}table{border-collapse:collapse;width:100%;white-space:nowrap}th,td{padding:12px;text-align:left;border-bottom:1px solid #e3e8ec;font-size:14px}th{background:#edf2f6}td.wrap{white-space:normal;min-width:220px;max-width:400px}#notice{padding:12px 0;min-height:44px;white-space:pre-wrap}.muted{color:#607588}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px}.card strong{font-size:32px;display:block;margin-top:12px}.badge{background:#e0f1e7;padding:5px 8px;border-radius:6px}.message{border-top:1px solid #dee5e9;padding-top:15px;margin-top:20px}textarea{width:100%;min-height:180px;padding:14px;margin:12px 0;border:1px solid #bbcbd7;border-radius:8px;font:14px/1.6 Arial}dialog{width:min(850px,95vw);max-height:90vh;overflow:auto;border:0;border-radius:14px;padding:24px}dialog::backdrop{background:#132c466b}a{color:#1868a2}@media(max-width:700px){header{display:block}main{padding:12px}}
+.detailsGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;margin:20px 0}.detailField{padding:10px;background:#f4f7f9;border-radius:6px}.detailField small,.detailField strong{display:block;overflow-wrap:anywhere}.detailField small{color:#607588;margin-bottom:7px}details{padding:16px 0;border-top:1px solid #dce3e9}summary{cursor:pointer;font-weight:bold;margin-bottom:16px}.currentStep{background:#edf8f0;padding:18px;border-radius:10px}.comment{border-top:1px solid #dce3e9;padding:14px 0}.comment p{white-space:pre-wrap;overflow-wrap:anywhere}td{white-space:normal;max-width:350px;overflow-wrap:anywhere}#consoleBody>h2{margin-bottom:8px}header{background:linear-gradient(105deg,#112b49,#173d63 70%,#145554);border-bottom:4px solid #37bf9a}button.accent{background:#087363;border-color:#087363;color:#fff}.assignPanel{background:#e7f6f1;border:1px solid #a6d5c7;border-left:4px solid #087363;border-radius:8px;padding:16px;margin-bottom:16px}.assignPanel .filters{align-items:end}.capacityCard{display:flex;flex-wrap:wrap;gap:8px 20px;color:#124b46;padding:10px 0}.capacityCard strong{color:#173d63}.linkChip,.phoneChip{display:inline-flex;align-items:center;padding:8px 12px;border-radius:7px;background:#e7f6f1;border:1px solid #a6d5c7;color:#065f53;font-weight:bold}.phoneChip{flex-direction:column;align-items:flex-start;gap:4px}.phoneChip small{font-weight:normal}.phoneLink{color:#065f53}.detailField a{overflow-wrap:anywhere}.prospectClock{background:#e7f6f1;border-left:4px solid #087363}.prospectClock small:last-child{margin:5px 0 0}.callNotes{width:min(100%,520px);min-height:0;height:64px;margin:0;display:block}.callNotesLabel{margin-bottom:12px}#detailBody{margin-top:16px}</style></head><body><header><div><h1>DEALWORKX | Team CRM</h1><p>Find your next conversation.</p></div><div id="identity">Checking access…</div></header><main><nav><button data-page="console">Console</button><button data-page="leads" class="secondary">Lead List</button><button data-page="interested" class="secondary">Interested Leads</button><button data-page="email requested" class="secondary">Email Requested</button><button data-page="history" class="secondary">Recorded Call History</button><button data-page="pipeline" class="secondary">Call Pipeline</button><button data-page="dashboard" class="secondary">Daily Dashboard</button><button id="refresh" class="secondary">Refresh</button></nav><div id="notice" role="status" aria-live="polite"></div><section id="page"></section></main><dialog id="detail"><button id="close">Close</button><div id="detailBody"></div></dialog><script>
+const $=id=>document.getElementById(id);let workspace=null,page='console',busy=false,selected=new Set(),leadFilters={q:'',status:'*',country:'*',zone:'*'},pipeline=[];
+function el(tag,text,cls){const e=document.createElement(tag);if(text!==undefined)e.textContent=text;if(cls)e.className=cls;return e;}
+function note(t){$('notice').textContent=t;}
+function action(fn){return async()=>{if(busy)return;try{await fn();}catch(e){note(e.message||String(e));}};}
+function button(text,fn,cls){const b=el('button',text,cls);b.onclick=action(fn);return b;}
+async function rpc(name,...args){busy=true;const buttons=[...document.querySelectorAll('button')].filter(b=>!b.disabled);buttons.forEach(b=>b.disabled=true);try{return await new Promise((resolve,reject)=>google.script.run.withSuccessHandler(resolve).withFailureHandler(reject)[name](...args));}finally{busy=false;buttons.forEach(b=>b.disabled=false);}}
+function blank(v){return !String(v||'').trim()||String(v).trim().toLowerCase()==='unassigned';}
+function select(label,values,value,onchange){const l=el('label',label),s=el('select');values.forEach(([v,t])=>s.add(new Option(t,v)));s.value=value;s.onchange=()=>onchange(s.value);l.append(s);return l;}
+function table(headers,rows){const wrap=el('div',undefined,'scroll'),t=el('table'),head=el('thead'),tr=el('tr');headers.forEach(h=>tr.append(el('th',h)));head.append(tr);t.append(head);const body=el('tbody');rows.forEach(cells=>{const r=el('tr');cells.forEach(c=>{const d=el('td');if(c instanceof Node)d.append(c);else d.textContent=c==null?'':c;r.append(d);});body.append(r);});t.append(body);wrap.append(t);if(!rows.length)wrap.append(el('p','No matching records.','muted'));return wrap;}
+function filtered(){return workspace.items.filter(p=>blank(p.owner)&&[p.id,p.name,p.company,p.email].join(' ').toLowerCase().includes(leadFilters.q.toLowerCase())&&['status','country','zone'].every(k=>leadFilters[k]==='*'||p[k]===leadFilters[k]));}
+async function loadWorkspace(){
+  const data=await rpc('getWorkspace');
+  if(!data||!data.user||!Array.isArray(data.items)){
+    throw new Error('Apps Script returned no workspace data. In Apps Script, check Executions for the latest getWorkspace run.');
+  }
+  return data;
+}
+async function init(){
+  if(!discard())return;
+  note('Loading your workspace…');
+  $('identity').textContent='Checking access…';
+  try{
+    workspace=await loadWorkspace();
+  }catch(error){
+    workspace=null;
+    selected.clear();
+    currentId=null;
+    currentRecord=null;
+    $('page').replaceChildren();
+    $('identity').textContent='Workspace unavailable';
+    note('Could not load workspace: '+(error?.message||String(error)));
+    return;
+  }
+  selected.clear();
+  $('identity').textContent=workspace.user.email+' · '+(workspace.user.admin?'Administrator':'Team member');
+  await show(page);
+}
+async function show(which){if(!workspace||!discard())return;page=which;document.querySelectorAll('[data-page]').forEach(b=>b.className=b.dataset.page===page?'':'secondary');$('page').replaceChildren();if(page==='console')drawConsole();if(page==='interested'||page==='email requested')await drawFollowups(page);if(page==='leads')drawLeads();if(page==='history')await drawRecordedCalls();if(page==='pipeline'){note('Loading call pipeline…');pipeline=await rpc('getPipeline');drawPipeline();}if(page==='dashboard'){note('Loading daily dashboard…');drawDashboard(await rpc('getDashboard'));}}
+function capacityCard(owner){
+  const box=el('div',undefined,'capacityCard'),c=(workspace.capacity||[]).find(r=>r.owner===owner);
+  if(!c){box.textContent='Choose a sequence owner to see daily capacity.';return box;}
+  function usage(label,used,limit){return label+' '+used+(limit==null?' used · limit unavailable':' / '+limit+' used · '+Math.max(0,limit-used)+' left');}
+  box.append(el('strong',c.owner+' · Daily capacity · '+workspace.today),el('span',usage('Email',c.emailUsed,c.emailLimit)),el('span',usage('LinkedIn',c.linkedinUsed,c.linkedinLimit)));
+  return box;
+}
+function assignmentControls(getIds,onSaved,label){
+  const root=el('div',undefined,'assignPanel'),row=el('div',undefined,'filters');
+  const owner=choice('Sequence owner',['',...workspace.owners],'');
+  const pain=choice('Primary Pain Point • Step 1',['',...(workspace.painPoints||[])],'');
+  owner.input.options[0].text='Choose a sequence owner';
+  pain.input.options[0].text='Choose a Step 1 pain point';
+  const cap=el('div');
+  const assign=button(label,async()=>{
+    const ids=getIds();
+    if(!ids.length||!owner.input.value||!pain.input.value)return;
+    if(!confirm('Assign '+ids.length+' lead(s) to '+owner.input.value+'? This applies the selected pain point, starts Step 1 with Email + LinkedIn, and sets the activation date to today.'))return;
+    const result=await rpc('assignLeads',ids,owner.input.value,pain.input.value);
+    await onSaved(result);
+  },'accent');
+  function update(){assign.disabled=!getIds().length||!owner.input.value||!pain.input.value;cap.replaceChildren(capacityCard(owner.input.value));}
+  owner.input.onchange=update;pain.input.onchange=update;
+  row.append(owner.label,pain.label,assign);root.append(row,cap);update();
+  return {root,update};
+}
+let updateLeadAssignment=()=>{};
+const leadPageSize=75;
+let leadPage=0;
+function drawLeads(){
+  const root=$('page');root.replaceChildren(el('h2','Unassigned Lead List'));
+  const filters=el('div',undefined,'filters'),label=el('label','Find a lead'),q=el('input');
+  q.placeholder='Name, ID, company or email';q.value=leadFilters.q;label.append(q);filters.append(label);
+  q.oninput=()=>{leadFilters.q=q.value;selected.clear();leadPage=0;drawLeadTable();};
+  for(const k of ['status','country','zone']){
+    const values=[['*',k==='status'?'All statuses':k==='country'?'All countries':'All timezones']];
+    [...new Set(workspace.items.filter(p=>blank(p.owner)).map(p=>p[k]).filter(Boolean))].sort().forEach(v=>values.push([v,v]));
+    filters.append(select(k==='zone'?'Timezone':k[0].toUpperCase()+k.slice(1),values,leadFilters[k],v=>{leadFilters[k]=v;selected.clear();leadPage=0;drawLeadTable();}));
+  }
+  root.append(filters);
+  if(workspace.user.admin){
+    const controls=assignmentControls(()=>[...selected],async result=>{await init();note(result.assigned+' leads assigned and activated.');},'Assign selected leads');
+    updateLeadAssignment=controls.update;root.append(controls.root);
+  }else{updateLeadAssignment=()=>{};root.append(capacityCard(workspace.user.owner));}
+  const list=el('div',undefined,'panel');list.id='leadTable';root.append(list);drawLeadTable();
+  const d=workspace.diagnostic;
+  if(d&&(d.missing||d.duplicates||!workspace.items.length))note('Workbook: '+d.sheetName+'. '+d.missing+' populated rows have no Prospect ID; '+d.duplicates+' rows have duplicate IDs. Check PROSPECT LIST column BN.');
+  else note('Showing unassigned leads.');
+}
+function drawLeadTable(){
+  const rows=filtered(),root=$('leadTable');
+  const pageCount=Math.max(1,Math.ceil(rows.length/leadPageSize));
+  leadPage=Math.min(leadPage,pageCount-1);
+  const first=leadPage*leadPageSize,last=Math.min(first+leadPageSize,rows.length);
+  const summary=()=>rows.length+' matching leads · '+selected.size+' selected';
+  const count=el('p',summary());root.replaceChildren(count);
+  if(pageCount>1){
+    const controls=el('div',undefined,'actions');
+    const previous=button('Previous',()=>{leadPage--;drawLeadTable();},'secondary');
+    const next=button('Next page',()=>{leadPage++;drawLeadTable();},'secondary');
+    previous.disabled=leadPage===0;next.disabled=leadPage===pageCount-1;
+    controls.append(previous,el('span',(first+1)+'–'+last+' of '+rows.length),next);root.append(controls);
+  }
+  const headers=['Prospect ID','Name','Company','Lead status','Current step','Country','Timezone',''];
+  if(workspace.user.admin)headers.unshift('Select');
+  root.append(table(headers,rows.slice(first,last).map(p=>{
+    const cells=[p.id,p.name,p.company,p.status,p.step,p.country,p.zone,button('Open',()=>openLead(p.id),'secondary')];
+    if(workspace.user.admin){
+      const cb=el('input');cb.type='checkbox';cb.checked=selected.has(p.id);cb.setAttribute('aria-label','Select '+p.id);
+      cb.onchange=()=>{if(cb.checked){if(selected.size>=50){cb.checked=false;note('Assign at most 50 leads at a time.');return;}selected.add(p.id);}else selected.delete(p.id);count.textContent=summary();updateLeadAssignment();};
+      cells.unshift(cb);
+    }
+    return cells;
+  })));
+  updateLeadAssignment();
+}
+function drawPipeline(){const root=$('page');root.replaceChildren(el('h2','Call Pipeline'),el('p','Live records from CALL PIPELINE, limited to leads you are permitted to see.','muted'));const filters=el('div',undefined,'filters'),q=el('input');q.placeholder='Search calls';q.setAttribute('aria-label','Search call pipeline');const box=el('div',undefined,'panel');let disposition='*';function draw(){const query=q.value.toLowerCase(),rows=pipeline.filter(r=>(disposition==='*'||r.disposition===disposition)&&[r.id,r.name,r.company,r.notes,r.owner].join(' ').toLowerCase().includes(query));box.replaceChildren(table(['Call date','Prospect','Name','Owner','Disposition','Callback','Phone','Notes'],rows.map(r=>[r.date,r.id,r.name,r.owner,r.disposition,r.callback,r.phone,el('span',r.notes)])));}q.oninput=draw;filters.append(q,select('Disposition',[['*','All dispositions'],...[...new Set(pipeline.map(r=>r.disposition))].sort().map(v=>[v,v])],'*',v=>{disposition=v;draw();}));root.append(filters,box);draw();note(pipeline.length+' accessible call records.');}
+function drawDashboard(d){const root=$('page');root.replaceChildren(el('h2','Daily Dashboard'),el('p',d.today+' · '+d.zone+' · Totals cover only the leads you can access.','muted'));const cards=el('div',undefined,'cards');for(const [key,title]of [['visible','Visible leads'],['unassigned','Unassigned'],['active','Active leads'],['dueToday','Due today'],['overdue','Overdue'],['callsToday','Calls today']]){const c=el('div',title,'card');c.append(el('strong',d.cards[key]));cards.append(c);}root.append(cards);if(d.sheetSummary){const p=el('div',undefined,'panel');p.append(el('h3','Workbook summary — DAILY DASHBOARD'));p.append(table(d.sheetSummary[0].filter((_,i)=>i%2===0),[d.sheetSummary[1].filter((_,i)=>i%2===0)]));root.append(p);}const calls=el('div',undefined,'panel');calls.append(el('h3','Today’s call dispositions'),table(['Disposition','Calls'],Object.entries(d.dispositions)));root.append(calls);const queue=el('div',undefined,'panel');queue.append(el('h3','Due and overdue leads'),table(['ID','Name','Owner','Step','Due','Status',''],d.queue.map(r=>[r.id,r.name,r.owner,r.step,r.due,r.task,button('Open',()=>openLead(r.id),'secondary')])));root.append(queue);note('Dashboard refreshed.');}
+let consoleFilters={status:'*',owner:'*',zone:'*',q:''},currentId=null,currentRecord=null,messageMode='JOB-TITLE ALIGNED',previewDate='',dirty=false;
+function queueMatches(p,f,today){
+  const task=String(p.task||'').trim().toLowerCase();
+  const status=f.status==='*'||(f.status==='Assigned'&&!blank(p.owner))||(f.status==='Due'&&['due','due today'].includes(task))||(f.status==='Overdue'&&task==='overdue')||(f.status==='Newly assigned'&&!blank(p.owner)&&p.assignmentDay===today)||(f.status==='UNASSIGNED'&&blank(p.owner))||f.status==='task:'+task;
+  return status&&(f.owner==='*'||p.owner===f.owner)&&(f.zone==='*'||p.zone===f.zone)&&[p.name,p.company,p.id,p.email].join(' ').toLowerCase().includes(f.q.toLowerCase());
+}
+function queue(){return workspace.items.filter(p=>queueMatches(p,consoleFilters,workspace.today));}
+function discard(){if(!dirty)return true;if(confirm('Leave this lead and discard unsaved form changes?')){dirty=false;return true;}return false;}
+function watch(input){input.addEventListener('input',()=>dirty=true);input.addEventListener('change',()=>dirty=true);return input;}
+function textInput(label,type='text',value=''){const l=el('label',label),i=el('input');i.type=type;i.value=value;l.append(i);return {label:l,input:i};}
+function choice(label,values,value){const l=el('label',label),s=el('select');values.forEach(v=>s.add(new Option(v,v)));s.value=values.includes(value)?value:values[0];l.append(s);return {label:l,input:s};}
+function websiteUrl(value){const url=String(value||'').trim();if(!url)return '';if(/^https?:\/\//i.test(url))return url;if(/^\/\//.test(url))return 'https:'+url;if(/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?:[/:?#]|$)/i.test(url))return 'https://'+url;return '';}
+function phoneLink(label,value){
+  const display=String(value||'').trim(),match=display.match(/^(\+?[\d .()\-]+?)(?:\s*(?:ext\.?|x|#)\s*(\d+))?$/i);
+  if(!match)return el('span',label+': '+display);
+  const dial=match[1].replace(/[^+\d]/g,'').replace(/^00/,'+');
+  if(!/^\+?\d{7,15}$/.test(dial))return el('span',label+': '+display);
+  const a=el('a',display,'phoneLink');a.href='tel:'+dial+(match[2]?';ext='+match[2]:'');a.target='_self';a.title='Click to call '+label;a.setAttribute('aria-label','Call '+label+' '+display);
+  const chip=el('span',undefined,'phoneChip');chip.append(el('small',label),a);return chip;
+}
+function safeLink(label,url){try{const u=new URL(url);if(!['https:','http:','mailto:','tel:'].includes(u.protocol))return el('span',label);const a=el('a',label);a.href=u.href;a.target='_blank';a.rel='noopener noreferrer';return a;}catch(_){return el('span',label);}}
+function drawConsole(){
+  const root=$('page');root.replaceChildren();const filters=el('div',undefined,'filters');
+  const statuses=[['*','All tasks'],...['Assigned','Due','Overdue','Newly assigned','UNASSIGNED'].map(v=>[v,v]),...[...new Set(workspace.items.map(p=>String(p.task||'').trim().toLowerCase()).filter(Boolean))].filter(v=>!['due','due today','overdue'].includes(v)).map(v=>['task:'+v,v.toUpperCase()])];
+  const onFilter=(key,v)=>{if(busy||!discard())return;consoleFilters[key]=v;currentId=null;currentRecord=null;drawConsole();};
+  filters.append(select('Task status',statuses,consoleFilters.status,v=>onFilter('status',v)),select('Owner',[['*','All accessible owners'],...[...new Set(workspace.items.map(p=>p.owner).filter(v=>!blank(v)))].sort().map(v=>[v,v])],consoleFilters.owner,v=>onFilter('owner',v)),select('Timezone',[['*','All timezones'],...[...new Set(workspace.items.map(p=>p.zone).filter(Boolean))].sort().map(v=>[v,v])],consoleFilters.zone,v=>onFilter('zone',v)));
+  const search=textInput('Search queue','search',consoleFilters.q);search.input.placeholder='Name, company or ID';search.input.onchange=()=>onFilter('q',search.input.value);filters.append(search.label);root.append(filters);
+  const items=queue(),actions=el('div',undefined,'actions'),pick=el('select');pick.setAttribute('aria-label','Prospect ID');pick.add(new Option('Select a prospect',''));items.forEach(p=>pick.add(new Option(p.id+' · '+p.name,p.id)));pick.value=currentId||'';pick.onchange=action(async()=>{if(!discard())return;if(pick.value)await openLead(pick.value);});actions.append(pick,button('Next lead →',nextLead));
+  for(const status of ['Assigned','Due','Overdue','Newly assigned'])actions.append(button('Next '+status.toLowerCase(),async()=>{if(!discard())return;consoleFilters.status=status;await nextLead();},'secondary'));
+  root.append(actions,el('p',items.length+' leads in this queue. “Newly assigned” means activation date is today ('+workspace.today+').','muted'));
+  const body=el('section',undefined,'panel');body.id='consoleBody';root.append(body);if(currentRecord&&items.some(p=>p.id===currentRecord.id))renderRecord(currentRecord,body);else{body.append(el('h2','Your outreach console'),el('p','Choose a task status, then click Next lead or select a Prospect ID.'));if(!items.length)body.append(el('p','No accessible leads match these filters.','muted'));}
+  const d=workspace.diagnostic;if(d&&(d.missing||d.duplicates||!workspace.items.length))note('Workbook: '+d.sheetName+'. '+d.missing+' populated rows have no Prospect ID; '+d.duplicates+' rows have duplicate IDs. Check PROSPECT LIST column BN.');else note('Ready.');
+}
+async function nextLead(){if(!discard())return;workspace=await loadWorkspace();const items=queue(),index=items.findIndex(p=>p.id===currentId);if(!items.length){currentId=null;currentRecord=null;drawConsole();note('No leads match this task status.');return;}if(index===items.length-1){drawConsole();note('End of this queue. Choose another status or select a lead to restart.');return;}await openLead(items[index+1].id);}
+async function openLead(id){if(!discard())return;note('Loading prospect details and messages…');const r=await rpc('getProspect',id,messageMode,previewDate);currentId=id;currentRecord=r;page='console';document.querySelectorAll('[data-page]').forEach(b=>b.className=b.dataset.page===page?'':'secondary');if(!queue().some(p=>p.id===id))consoleFilters={status:'*',owner:'*',zone:'*',q:''};drawConsole();note('Loaded '+r.id+'.');}
+async function afterSave(id){dirty=false;workspace=await loadWorkspace();await openLead(id);}
+let clockTimer;
+function prospectClock(zone){
+  clearInterval(clockTimer);
+  const clock=el('div',undefined,'detailField prospectClock');
+  const value=el('strong');clock.append(el('small','Prospect local time'),value);
+  let formatter;
+  try{
+    if(!zone)throw Error('Missing time zone');
+    formatter=new Intl.DateTimeFormat(undefined,{timeZone:zone,weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit',second:'2-digit',timeZoneName:'short'});
+  }catch(_){value.textContent='Unavailable · check the prospect time zone';return clock;}
+  const update=()=>{value.textContent=formatter.format(new Date());};
+  update();clock.append(el('small',zone));
+  clockTimer=setInterval(()=>{if(clock.isConnected)update();else clearInterval(clockTimer);},1000);
+  return clock;
+}
+function gmailCompose(email){
+  const address=String(email||'').trim();
+  if(!/^[^\s,@;<>]+@[^\s,@;<>]+\.[^\s,@;<>]+$/.test(address))return null;
+  const url=new URL('https://mail.google.com/mail/');
+  url.search=new URLSearchParams({view:'cm',fs:'1',to:address}).toString();
+  return url.href;
+}
+async function showProspectFields(r){
+  note('Loading full prospect record…');
+  const fields=await rpc('getProspectFields',r.id);
+  $('detailBody').replaceChildren(el('h2','Prospect fields · '+r.id),table(['Field','Value'],fields.map(f=>[f.label,f.value])));
+  $('detail').setAttribute('aria-label','Full prospect record');$('detail').showModal();note('');
+}
+function renderRecord(r,body){
+  body.replaceChildren(el('h2',r.name),el('p',r.id+' · '+(r.owner||'UNASSIGNED')),el('p',r.step+' · '+r.task,'badge'));
+  const links=el('div',undefined,'actions');for(const [label,url]of [['LinkedIn profile',r.profiles.linkedin],['Company website',r.profiles.website],['Company LinkedIn',r.profiles.companyLinkedin]])if(websiteUrl(url)){const a=safeLink(label,websiteUrl(url));a.className='linkChip';links.append(a);}const gmail=gmailCompose(r.email);if(gmail){const a=safeLink('Email prospect in Gmail',gmail);a.className='linkChip';links.append(a);}links.append(button('View all 65 prospect fields',()=>showProspectFields(r),'secondary'));body.append(links);
+  const details=el('div',undefined,'detailsGrid');
+  details.append(prospectClock(r.zone));
+  const profile=[['Company name',r.company],['Email status',r.contact?.emailStatus],['Number of employees',r.contact?.employees],['Contact state',r.contact?.state],['Contact country',r.country]];
+  for(const [label,value] of profile){
+    const detail=el('div',undefined,'detailField');detail.append(el('small',label),el('strong',value||'—'));details.append(detail);
+  }
+  const keyFields=new Set(['job title','industry','lead status','primary pain (step 1)']);
+  const shown=new Set();
+  for(const field of r.fields){
+    const label=field.label.trim().toLowerCase();
+    if(!field.value||!keyFields.has(label)||shown.has(label))continue;
+    shown.add(label);
+    const detail=el('div',undefined,'detailField');detail.append(el('small',field.label),el('strong',field.value));details.append(detail);
+  }
+  body.append(details,callPanel(r));
+  if(workspace.user.admin&&blank(r.owner))body.append(assignmentControls(()=>[r.id],()=>afterSave(r.id),'Assign this lead').root);
+  if(r.canComplete){const settings=el('details'),f=el('div',undefined,'filters');settings.append(el('summary','Edit lead status, disposition and channel plan'));const status=choice('Lead status',['Inactive','Active','Paused','Bad'],r.status),disp=choice('Sequence disposition',['None','Bounced','Requested to unsubscribe','Replied','Meeting booked'],r.disposition),plan=choice('Step 1 channels',['Email + LinkedIn','Email only'],r.channelPlan);[status,disp,plan].forEach(x=>{watch(x.input);f.append(x.label);});f.append(button('Save lead settings',async()=>{await rpc('saveLeadSettings',r.id,{status:status.input.value,disposition:disp.input.value,channelPlan:plan.input.value});await afterSave(r.id);}));settings.append(f);body.append(settings);}
+  const outreach=el('section',undefined,'panel');
+  outreach.append(el('h3','Current step outreach'),button('Check current step',()=>openLead(r.id),'secondary'));
+  const options=el('details'),preview=el('div',undefined,'filters');
+  const mode=choice('Messaging mode',['JOB-TITLE ALIGNED','GENERAL'],messageMode),date=textInput('Preview as-of date','date',previewDate||workspace.today);
+  preview.append(mode.label,date.label,button('Update preview',async()=>{if(!discard())return;messageMode=mode.input.value;previewDate=date.input.value;await openLead(r.id);}));
+  options.append(el('summary','Message options'),preview);outreach.append(options);
+  if(!r.messages.length)outreach.append(el('p','No pending message for the current step.','muted'));
+  for(const m of r.messages){
+    const card=el('div',undefined,'message currentStep');
+    card.append(el('h3',m.step+' · '+m.channel));
+    if(!m.ready){card.append(el('p',m.reason+(m.eligible?' · Eligible: '+m.eligible:''),'muted'));outreach.append(card);continue;}
+    if(m.subject)card.append(el('p','Subject: '+m.subject));
+    const t=el('textarea');t.value=m.body;t.readOnly=true;t.setAttribute('aria-label',m.channel+' message');card.append(t);
+    const actions=el('div',undefined,'actions');
+    function copy(value){return async()=>{try{await navigator.clipboard.writeText(value);note('Copied.');}catch(_){t.value=value;t.focus();t.select();note('Press Ctrl+C to copy.');}};}
+    if(m.subject)actions.append(button('Copy subject',copy(m.subject),'secondary'));
+    actions.append(button('Copy message',copy(m.body)));
+    if(r.canComplete)actions.append(button('Mark complete',async()=>{
+      if(!confirm('Confirm '+m.step+' '+m.channel+' was sent to '+r.id+'?'))return;
+      await rpc('markComplete',r.id,m.index);await afterSave(r.id);
+    },'secondary'));
+    card.append(actions);outreach.append(card);
+  }
+  if(r.completed?.length){
+    const history=el('details');history.append(el('summary','Completed steps'));
+    for(const item of r.completed){
+      const row=el('div',undefined,'actions');row.append(el('span',item.step+' · '+item.channel));
+      if(r.canComplete)row.append(button('Reset to pending',async()=>{
+        if(!confirm('Reset this channel to pending and clear its completion date?'))return;
+        await rpc('markComplete',r.id,item.index,'PENDING');await afterSave(r.id);
+      },'secondary'));
+      history.append(row);
+    }
+    outreach.append(history);
+  }
+  body.append(outreach);
+  const comments=el('section',undefined,'panel');comments.id='savedComments';comments.append(el('h3','Comments'));if(r.canComplete){const t=el('textarea');t.placeholder='Add a follow-up note…';t.maxLength=4000;t.setAttribute('aria-label','New comment');watch(t);comments.append(t,button('Save comment',async()=>{await rpc('addComment',r.id,t.value);await afterSave(r.id);}));}else comments.append(el('p','Assign this lead before adding comments.','muted'));r.comments.forEach(c=>{const item=el('div',undefined,'comment');item.append(el('small',c.date+' · '+c.author),el('p',c.text));comments.append(item);});if(!r.comments.length)comments.append(el('p','No comments yet.','muted'));body.append(comments);
+}
+function callPanel(r){
+  const calls=el('section',undefined,'panel'),phoneNumbers=r.phones.filter(p=>String(p.number||'').trim());
+  calls.append(el('h3','Call this prospect'));
+  const phones=el('div',undefined,'actions');
+  for(const phone of phoneNumbers)phones.append(phoneLink(phone.label,phone.number));
+  if(phoneNumbers.length)calls.append(phones);
+  else calls.append(el('p','No phone numbers on this record.','muted'));
+  if(r.canComplete&&phoneNumbers.length){
+    const form=el('div',undefined,'filters');
+    const phone=choice('Number called',phoneNumbers.map(p=>p.label),''),disposition=choice('Call outcome',r.dispositions,''),callback=textInput('Callback date (optional)','date');
+    const notesLabel=el('label','Call notes','callNotesLabel'),notes=el('textarea',undefined,'callNotes');
+    notes.placeholder='Add a short call note';notes.maxLength=4000;notes.rows=2;notesLabel.append(notes);
+    [phone.input,disposition.input,callback.input,notes].forEach(watch);
+    form.append(phone.label,disposition.label,callback.label);
+    calls.append(form,notesLabel,button('Save call',async()=>{
+      if(!confirm('Save this call attempt for '+r.id+'?'))return;
+      await rpc('saveCall',r.id,{phoneType:phone.input.value,disposition:disposition.input.value,callback:callback.input.value,notes:notes.value});
+      await afterSave(r.id);
+    }));
+  }
+  calls.append(button('View recorded call history',()=>openRecordedCalls(r.id),'secondary'));
+  return calls;
+}
+let historyProspectId='';
+async function openRecordedCalls(id=''){
+  if(!discard())return;
+  historyProspectId=id;await show('history');
+}
+async function drawRecordedCalls(){
+  note('Loading recorded calls…');
+  const records=await rpc('getRecordedCalls',historyProspectId);
+  const root=$('page');root.replaceChildren(el('h2','Recorded Call History'));
+  const filters=el('div',undefined,'filters'),search=textInput('Search call records','search');
+  search.input.placeholder='Prospect, phone, outcome or notes';filters.append(search.label);
+  if(historyProspectId){
+    filters.append(button('Show all recorded calls',()=>openRecordedCalls(),'secondary'));
+    root.append(el('p','Showing calls for '+historyProspectId,'badge'));
+  }
+  const box=el('div',undefined,'panel');root.append(filters,box);
+  let offset=0;const size=75;
+  function draw(){
+    const term=search.input.value.trim().toLowerCase();
+    const matches=records.filter(r=>[r.id,r.name,r.company,r.owner,r.phone,r.disposition,r.notes].join(' ').toLowerCase().includes(term));
+    const end=Math.min(offset+size,matches.length),controls=el('div',undefined,'actions');
+    const prev=button('Previous',()=>{offset-=size;draw();},'secondary'),next=button('Next page',()=>{offset+=size;draw();},'secondary');
+    prev.disabled=offset===0;next.disabled=end>=matches.length;
+    if(matches.length>size)controls.append(prev,el('span',(offset+1)+'–'+end+' of '+matches.length),next);
+    box.replaceChildren(el('p',matches.length+' recorded calls'),controls,table(['Date','Prospect ID','Name','Owner','Phone','Outcome','Callback','Notes'],matches.slice(offset,end).map(r=>[r.date,r.id,r.name,r.owner,r.phone,r.disposition,r.callback,r.notes])));
+  }
+  search.input.oninput=()=>{offset=0;draw();};draw();note('');
+}
+async function drawFollowups(kind){note('Loading follow-up leads…');const rows=await rpc('getFollowups',kind),root=$('page'),title=kind==='interested'?'Interested Leads':'Email Requested';root.replaceChildren(el('h2',title),el('p','Based on each prospect’s latest recorded call outcome. Open a lead to view or add saved comments.','muted'));const filter=textInput('Search leads','search'),box=el('div',undefined,'panel');root.append(filter.label,box);function draw(){const q=filter.input.value.toLowerCase();box.replaceChildren(table(['ID','Name','Company','Owner','Last call','Callback','Call notes',''],rows.filter(p=>[p.id,p.name,p.company,p.owner,p.call.notes].join(' ').toLowerCase().includes(q)).map(p=>[p.id,p.name,p.company,p.owner,p.call.date,p.call.callback,p.call.notes,button('Open & comment',async()=>{await openLead(p.id);if(currentId===p.id)$('savedComments').scrollIntoView({behavior:'smooth'});},'secondary')])));}filter.input.oninput=draw;draw();note(rows.length+' '+title.toLowerCase()+'.');}
+
+
+$('close').onclick=()=>$('detail').close();document.querySelectorAll('[data-page]').forEach(b=>b.onclick=action(()=>b.dataset.page==='history'?openRecordedCalls():show(b.dataset.page)));$('refresh').onclick=action(async()=>{if(!discard())return;currentRecord=null;await init();});if(typeof google!=='undefined'&&google.script)init().catch(e=>note(e.message));else note('Preview only. Install in Google Apps Script and configure approved user emails to connect.');
+</script></body></html>
+
