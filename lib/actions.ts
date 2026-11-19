@@ -425,22 +425,60 @@ export async function addNote(_: FormState, form: FormData): Promise<FormState> 
  * Send an email to the lead through Brevo, from the signed-in user's own address. With a step, the step is
  * claimed first (so two clicks or two people can't send it twice), then marked sent once Brevo accepts it.
  */
+/** The composer's subject and message as a finished email (cleaned HTML + signature, and the plain-text version). */
+async function composedEmail(user: User, form: FormData): Promise<{ error: string } | { subject: string; body: string; html: string; text: string }> {
+  const subject = str(form, "subject", 300);
+  // The plain-text version (for the text part and the activity log) and the formatted HTML from the editor.
+  const body = str(form, "body", 20000).replace(/\r\n?/g, "\n").replace(/\n{3,}/g, "\n\n");
+  const rawHtml = String(form.get("html") ?? "").slice(0, 200_000);
+  const problem = senderProblem(user.email);
+  if (problem) return { error: problem };
+  if (!subject) return { error: "Add a subject." };
+  if (!body) return { error: "Write the message first." };
+  const content = (rawHtml && cleanEmailHtml(rawHtml)) || textToHtml(body);
+  const signature = form.get("signature") === "1" ? await signatureFor(user.id) : null;
+  return {
+    subject,
+    body,
+    html: emailDocument(content, signature ? signatureHtml(signature, publicAppUrl()) : null),
+    text: signature ? `${body}\n\n${signatureText(signature)}` : body,
+  };
+}
+
+/**
+ * "Send test to me": the exact email the lead would get, sent to the user's own address with "[Test]" in the
+ * subject, so they can check the formatting and signature first. Nothing is marked sent or logged.
+ */
+export async function sendTestEmail(_: FormState, form: FormData): Promise<FormState> {
+  try {
+    const user = await requireUser();
+    const email = await composedEmail(user, form);
+    if ("error" in email) return email;
+    const d = await db();
+    const [lead] = await d.query<{ owner_id: number | null }>("select owner_id from leads where id = $1", [Number(form.get("leadId"))]);
+    if (!lead || !canWrite(user, lead.owner_id == null ? null : Number(lead.owner_id))) return { error: "This lead isn't yours to email. Refresh the list." };
+    await sendBrevoEmail({
+      from: { name: user.name, email: user.email },
+      to: { name: user.name, email: user.email },
+      subject: `[Test] ${email.subject}`,
+      html: email.html,
+      text: email.text,
+    });
+    return { ok: `Test sent to ${user.email}. Check your inbox, then send it to the lead.` };
+  } catch (e) {
+    return failed(e);
+  }
+}
+
 export async function sendEmail(_: FormState, form: FormData): Promise<FormState> {
   let claimed: { leadId: number; stepId: number } | null = null;
   try {
     const user = await requireUser();
     const leadId = Number(form.get("leadId"));
     const stepId = Number(form.get("stepId")) || null;
-    const subject = str(form, "subject", 300);
-    // The plain-text version (for the text part and the activity log) and the formatted HTML from the editor.
-    const body = str(form, "body", 20000).replace(/\r\n?/g, "\n").replace(/\n{3,}/g, "\n\n");
-    const rawHtml = String(form.get("html") ?? "").slice(0, 200_000);
-    const withSignature = form.get("signature") === "1";
-    const problem = senderProblem(user.email);
-    if (problem) return { error: problem };
-    if (!subject) return { error: "Add a subject." };
-    if (!body) return { error: "Write the message first." };
-    const content = (rawHtml && cleanEmailHtml(rawHtml)) || textToHtml(body);
+    const email = await composedEmail(user, form);
+    if ("error" in email) return email;
+    const { subject, body } = email;
 
     const d = await db();
     const [lead] = await d.query<{ id: number; owner_id: number | null; email: string; first_name: string; last_name: string; status: string; disposition: string }>(
@@ -468,13 +506,12 @@ export async function sendEmail(_: FormState, form: FormData): Promise<FormState
     }
 
     const name = `${lead.first_name} ${lead.last_name}`.trim();
-    const signature = withSignature ? await signatureFor(user.id) : null;
     const messageId = await sendBrevoEmail({
       from: { name: user.name, email: user.email },
       to: { name, email: lead.email },
       subject,
-      html: emailDocument(content, signature ? signatureHtml(signature, publicAppUrl()) : null),
-      text: signature ? `${body}\n\n${signatureText(signature)}` : body,
+      html: email.html,
+      text: email.text,
     });
     claimed = null; // sent: the step stays marked
 

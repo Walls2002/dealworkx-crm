@@ -2,8 +2,8 @@
 
 import Link from "next/link";
 import { useActionState, useEffect, useMemo, useState } from "react";
-import { Mail, SendHorizontal } from "lucide-react";
-import { sendEmail, type FormState } from "@/lib/actions";
+import { FlaskConical, Mail, SendHorizontal } from "lucide-react";
+import { sendEmail, sendTestEmail, type FormState } from "@/lib/actions";
 import { signatureHtml, type SignatureData } from "@/lib/signature";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -28,7 +28,10 @@ export function EmailComposer({ leadId, to, toName, from, signature, stepId, ste
   leadId: number; to: string; toName: string; from: { name: string; email: string }; signature: SignatureData;
   stepId?: number; stepLabel?: string; subject?: string; body?: string; onClose: () => void; className?: string;
 }) {
-  const [state, action, pending] = useActionState<FormState, FormData>(toastOnSuccess(sendEmail), null);
+  const [state, action, sending] = useActionState<FormState, FormData>(toastOnSuccess(sendEmail), null);
+  // "Send test to me": same form, same email, delivered to the sender. The composer stays open afterwards.
+  const [test, sendTest, testing] = useActionState<FormState, FormData>(sendTestEmail, null);
+  const pending = sending || testing;
   const [withSignature, setWithSignature] = useState(true);
   useEffect(() => { if (state?.ok) onClose(); }, [state, onClose]);
   const id = (k: string) => `mail-${leadId}-${stepId ?? "x"}-${k}`;
@@ -67,10 +70,14 @@ export function EmailComposer({ leadId, to, toName, from, signature, stepId, ste
         )}
       </div>
       <div className="flex flex-wrap items-center gap-2">
-        <Button size="sm" disabled={pending}><SendHorizontal /> {pending ? "Sending…" : "Send email"}</Button>
+        <Button size="sm" disabled={pending}><SendHorizontal /> {sending ? "Sending…" : "Send email"}</Button>
+        <Button size="sm" variant="outline" formAction={sendTest} disabled={pending} title={`Send this exact email to ${from.email} first`}>
+          <FlaskConical /> {testing ? "Sending test…" : "Send test to me"}
+        </Button>
         <Button type="button" variant="ghost" size="sm" onClick={onClose} disabled={pending}>Cancel</Button>
-        {state?.error && <Status state={state} />}
       </div>
+      {state?.error && <Status state={state} />}
+      {!state?.error && test && <Status state={test} />}
     </form>
   );
 }
