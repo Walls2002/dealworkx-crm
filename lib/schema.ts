@@ -78,7 +78,7 @@ create table if not exists activities (
   id          serial primary key,
   lead_id     int not null references leads(id) on delete cascade,
   user_id     int references users(id) on delete set null,
-  kind        text not null check (kind in ('call', 'note', 'step', 'assign', 'status', 'import')),
+  kind        text not null check (kind in ('call', 'note', 'step', 'assign', 'status', 'import', 'email')),
   outcome     text not null default '',
   phone       text not null default '',
   body        text not null default '',
@@ -123,12 +123,60 @@ do $$ begin
     create unique index if not exists leads_linkedin_uniq on leads(linkedin_key) where linkedin_key <> '';
   end if;
 end $$;
+-- Built for 100k+ leads: each lead stores its next action and its last call, kept current by every write
+-- (lib/cache.ts), so lists filter and sort on indexed columns instead of recomputing every lead.
+alter table leads add column if not exists step_due date;
+alter table leads add column if not exists step_number int;
+alter table leads add column if not exists step_channel text;
+alter table leads add column if not exists next_due date;
+alter table leads add column if not exists last_call_id int;
+alter table leads add column if not exists last_call_at timestamptz;
+alter table leads add column if not exists last_call_outcome text not null default '';
+create index if not exists leads_owner_due_idx on leads(owner_id, next_due);
+create index if not exists leads_next_due_idx on leads(next_due, last_name);
+create index if not exists leads_name_idx on leads(last_name, first_name);
+create index if not exists leads_unassigned_name_idx on leads(last_name, first_name) where owner_id is null;
+create index if not exists leads_activated_idx on leads(activated_on);
+create index if not exists leads_status_idx on leads(status);
+create index if not exists leads_country_idx on leads(country);
+create index if not exists leads_timezone_idx on leads(timezone);
+create index if not exists leads_last_call_idx on leads(last_call_outcome, last_call_at desc);
+create index if not exists activities_calls_idx on activities(created_at desc, id desc) where kind = 'call';
+create index if not exists lead_steps_sent_idx on lead_steps(sent_at) where sent_at is not null;
+-- Fast "contains" search on name, company, email and title (trigram index) where the database supports it.
+do $$ begin
+  create extension if not exists pg_trgm;
+exception when others then null;
+end $$;
+do $$ begin
+  if exists (select 1 from pg_extension where extname = 'pg_trgm') then
+    create index if not exists leads_search_trgm on leads
+      using gin ((lower(first_name || ' ' || last_name || ' ' || company || ' ' || email || ' ' || title)) gin_trgm_ops);
+  end if;
+end $$;
+
 -- Pairs an admin marked "not duplicates", so they stop showing in the duplicates list.
 create table if not exists duplicate_dismissals (
   lead_a int not null references leads(id) on delete cascade,
   lead_b int not null references leads(id) on delete cascade,
   primary key (lead_a, lead_b)
 );
+
+-- Emails sent from the CRM through Brevo: kind 'email', with the subject, the Brevo message ID (for bounce tracking later)
+-- and, in outcome, the step it sent ("Step 2 · Email"; blank for a one-off email).
+alter table activities add column if not exists subject text not null default '';
+alter table activities add column if not exists message_id text not null default '';
+do $$ begin
+  if exists (select 1 from pg_constraint where conname = 'activities_kind_check' and pg_get_constraintdef(oid) not like '%email%') then
+    alter table activities drop constraint activities_kind_check;
+    alter table activities add constraint activities_kind_check
+      check (kind in ('call', 'note', 'step', 'assign', 'status', 'import', 'email'));
+  end if;
+end $$;
+
+-- Email signature details each user sets for themselves (company website and address are settings).
+alter table users add column if not exists title text not null default '';
+alter table users add column if not exists phone text not null default '';
 
 -- Admin-editable settings (daily limits). Blank value = no limit.
 create table if not exists settings (

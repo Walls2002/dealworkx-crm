@@ -1,9 +1,10 @@
 import Link from "next/link";
 import { PhoneCall, ThumbsUp, X, PhoneOff } from "lucide-react";
 import { requireUser } from "@/lib/auth";
-import { callOutcomeCounts, leadName, listCallOutcomes, listCalls } from "@/lib/data";
+import { callOutcomeCounts, leadName, listCallOutcomes, listCalls, PAGE_SIZE, pageSizeOf } from "@/lib/data";
 import { dateTime, shortDate } from "@/lib/dates";
 import { first, withParams, type Params } from "@/lib/url";
+import { clampPage } from "@/lib/paging";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -35,14 +36,16 @@ export async function CallsPage({ mode, searchParams }: { mode: "history" | "pip
   const outcome = outcomes.includes(first(sp.outcome)) ? first(sp.outcome) : "";
   const forId = mode === "history" ? Number(first(sp.for)) || null : null;
   const page = Math.max(1, Number(first(sp.page)) || 1);
+  const size = pageSizeOf(first(sp.size));
   const leadId = Number(first(sp.lead)) || null;
-  const params: Params = { q, outcome, for: forId ? String(forId) : undefined, page: page > 1 ? String(page) : undefined };
+  const params: Params = { q, outcome, for: forId ? String(forId) : undefined, page: page > 1 ? String(page) : undefined, size: size === PAGE_SIZE ? undefined : String(size) };
 
   const [{ rows, total }, forName, counts] = await Promise.all([
-    listCalls(user, { q, outcome, leadId: forId, page }),
+    listCalls(user, { q, outcome, leadId: forId, page, size }),
     forId ? leadName(user, forId) : Promise.resolve(null),
     callOutcomeCounts(user),
   ]);
+  clampPage(page, total, size, params, path, { lead: leadId ? String(leadId) : undefined });
   const hrefFor = (id: number) => withParams(params, { lead: String(id) }, path);
   const leadIds = [...new Set(rows.map((r) => r.leadId))];
   const title = mode === "pipeline" ? "Call Pipeline" : "Recorded Call History";
@@ -78,7 +81,7 @@ export async function CallsPage({ mode, searchParams }: { mode: "history" | "pip
           <Segments
             label="Call outcome"
             items={[{ value: "", label: "All", n: allCalls }, ...outcomes.map((o) => ({ value: o, label: o, n: counts[o] ?? 0 }))].map(({ value, label, n }) => ({
-              label, count: n, href: withParams({ q }, { outcome: value || undefined }, path), active: outcome === value,
+              label, count: n, href: withParams({ q, size: params.size }, { outcome: value || undefined }, path), active: outcome === value,
             }))}
           />
         )}
@@ -125,7 +128,7 @@ export async function CallsPage({ mode, searchParams }: { mode: "history" | "pip
           </DataTable>
         )}
       </div>
-      <Pager page={page} total={total} params={params} path={path} noun={["call", "calls"]} />
+      <Pager page={page} total={total} size={size} params={params} path={path} noun={["call", "calls"]} />
 
       {leadId && (
         <LeadPanelHost user={user} leadId={leadId} ids={leadIds} hrefFor={hrefFor} closeHref={withParams(params, {}, path)} listLabel={title} />

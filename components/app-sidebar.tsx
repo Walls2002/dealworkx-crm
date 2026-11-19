@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import {
+import { PenLine,
   ChevronRight, CopyCheck, Headset, History, LayoutDashboard, ListOrdered, LogOut, Mail, PhoneCall, ThumbsUp, Upload, Users,
   type LucideIcon,
 } from "lucide-react";
@@ -16,6 +16,7 @@ import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Avatar } from "./avatar";
+import { Logo } from "./logo";
 
 export type ShellUser = { name: string; email: string; admin: boolean };
 
@@ -53,6 +54,8 @@ export function UserMenuContent({ user, onPick, side = "bottom", align = "end" }
         </>
       )}
       <DropdownMenuSeparator />
+      <DropdownMenuItem asChild><Link href="/signature" onClick={onPick}><PenLine /> My email signature</Link></DropdownMenuItem>
+      <DropdownMenuSeparator />
       <form action={logout}>
         <DropdownMenuItem variant="destructive" asChild>
           <button type="submit" className="w-full"><LogOut /> Sign out</button>
@@ -70,13 +73,8 @@ export function AppSidebar({ user, counts }: { user: ShellUser; counts: NavCount
   return (
     <Sidebar>
       <SidebarHeader className="px-3 pt-4">
-        <Link href="/" onClick={close} className="flex items-center gap-2.5 rounded-lg p-1.5 hover:bg-sidebar-accent/60">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src="/dealworkx-mark.png" alt="" width={32} height={32} className="size-8 shrink-0 rounded-lg" />
-          <div className="grid leading-tight">
-            <span className="text-sm font-semibold">DealWorkx</span>
-            <span className="text-xs text-muted-foreground">Team CRM</span>
-          </div>
+        <Link href="/" onClick={close} aria-label="DealWorkx, Console" className="flex h-11 items-center rounded-lg px-2 hover:bg-sidebar-accent/60">
+          <Logo />
         </Link>
       </SidebarHeader>
 
@@ -96,7 +94,7 @@ export function AppSidebar({ user, counts }: { user: ShellUser; counts: NavCount
                         <span>{label}</span>
                       </Link>
                     </SidebarMenuButton>
-                    {n > 0 && <SidebarMenuBadge className="top-2 text-[11px] tabular-nums peer-data-[active=true]/menu-button:text-sidebar-accent-foreground">{n}</SidebarMenuBadge>}
+                    {n > 0 && <SidebarMenuBadge className="top-2 text-[11px] tabular-nums peer-data-[active=true]/menu-button:text-sidebar-accent-foreground">{n.toLocaleString("en-US")}</SidebarMenuBadge>}
                   </SidebarMenuItem>
                 );
               })}

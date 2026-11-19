@@ -1,13 +1,15 @@
 import type { Db } from "./db";
 
-/** Create the lead's step rows (idempotent). Due dates count from the activation date. */
-export async function scheduleSteps(tx: Db, leadId: number, activatedOn: string): Promise<void> {
+/** Create the step rows of one lead or many (idempotent). Due dates count from the activation date. */
+export async function scheduleSteps(tx: Db, leadIds: number | number[], activatedOn: string): Promise<void> {
+  const ids = Array.isArray(leadIds) ? leadIds : [leadIds];
+  if (!ids.length) return;
   await tx.query(
     `insert into lead_steps (lead_id, step_id, due_on)
-     select $1, s.id, ($2::date + s.day_offset)
-       from sequence_steps s
+     select l.id, s.id, ($2::date + s.day_offset)
+       from unnest($1::int[]) as l(id) cross join sequence_steps s
      on conflict (lead_id, step_id) do nothing`,
-    [leadId, activatedOn],
+    [ids, activatedOn],
   );
 }
 

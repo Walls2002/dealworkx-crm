@@ -4,6 +4,8 @@ import { requireUser } from "@/lib/auth";
 import { dashboard, listCallOutcomes } from "@/lib/data";
 import { APP_TIMEZONE, dateTime } from "@/lib/dates";
 import { cn } from "@/lib/utils";
+import { first } from "@/lib/url";
+import { Pager } from "@/components/pager";
 import { Button } from "@/components/ui/button";
 import { TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Avatar } from "@/components/avatar";
@@ -27,9 +29,10 @@ function Section({ title, note, action, children, className }: { title: string; 
   );
 }
 
-export default async function DashboardPage() {
+export default async function DashboardPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const user = await requireUser();
-  const [d, outcomeList] = await Promise.all([dashboard(user), listCallOutcomes()]);
+  const qp = Math.max(1, Number(first((await searchParams).qp)) || 1);
+  const [d, outcomeList] = await Promise.all([dashboard(user, qp), listCallOutcomes()]);
   const admin = user.role === "admin";
   const dayLabel = new Intl.DateTimeFormat("en-GB", { weekday: "short", day: "numeric", month: "short", year: "numeric", timeZone: "UTC" }).format(new Date(d.today + "T00:00:00Z"));
   const sum = (k: "callsToday" | "stepsToday") => d.reps.reduce((n, r) => n + r[k], 0);
@@ -93,9 +96,7 @@ export default async function DashboardPage() {
               </TableBody>
             </DataTable>
           )}
-          {d.queueTotal > d.queue.length && (
-            <Link href={admin ? "/?view=overdue" : "/"} className="text-[13px] font-medium text-primary hover:underline">See all {d.queueTotal} in the Console</Link>
-          )}
+          <Pager page={qp} total={d.queueTotal} size={d.queueSize} params={{ qp: qp > 1 ? String(qp) : undefined }} path="/dashboard" pageParam="qp" sizes={false} noun={["lead", "leads"]} />
         </Section>
 
         <Section className="xl:col-span-2" title="Today's call dispositions" note={`${d.callsToday} ${d.callsToday === 1 ? "call" : "calls"} logged today`}>
@@ -166,7 +167,7 @@ export default async function DashboardPage() {
           </Section>
         )}
 
-        <Section className={admin ? "xl:col-span-2" : "xl:col-span-5"} title="Latest activity" note="Calls, comments and sent steps">
+        <Section className={admin ? "xl:col-span-2" : "xl:col-span-5"} title="Latest activity" note="Calls, comments, emails and sent steps">
           {d.recent.length === 0 ? (
             <EmptyState title="Nothing logged yet" />
           ) : (
@@ -179,7 +180,7 @@ export default async function DashboardPage() {
                       <Link href={`/?view=all&lead=${a.leadId}`} className="font-medium hover:underline">{a.leadName}</Link>
                       <span className="text-muted-foreground">, {a.company}</span>
                     </p>
-                    <p>{a.kind === "call" ? `Call · ${a.outcome}` : a.kind === "note" ? "Comment added" : a.body}</p>
+                    <p>{a.kind === "call" ? `Call · ${a.outcome}` : a.kind === "note" ? "Comment added" : a.kind === "email" ? `Email sent${a.outcome ? ` · ${a.outcome}` : ""}` : a.body}</p>
                     <p className="text-xs text-muted-foreground">{a.userName} · {dateTime(a.createdAt)}</p>
                   </div>
                 </li>

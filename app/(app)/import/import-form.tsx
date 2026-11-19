@@ -39,11 +39,14 @@ export function ImportForm() {
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [allow, setAllow] = useState<Set<string>>(new Set());
   const [file, setFile] = useState<File | null>(null);
+  const [possPage, setPossPage] = useState(1);
+  const POSS = 50;
 
   // Pre-tick every sheet that follows the template and has new leads; possible duplicates start as "skip".
   useEffect(() => {
     setPicked(new Set((preview?.sheets ?? []).filter((s) => !s.missingRequired.length && s.fresh + s.possible > 0).map((s) => s.name)));
     setAllow(new Set());
+    setPossPage(1);
   }, [preview]);
 
   function send(action: (fd: FormData) => void, extra?: { sheets: string[]; allow: string[] }) {
@@ -175,7 +178,7 @@ export function ImportForm() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {possible.slice(0, 300).map((f) => (
+              {possible.slice((possPage - 1) * POSS, possPage * POSS).map((f) => (
                 <TableRow key={f.key} className="h-14">
                   <TableCell className="pl-4 whitespace-normal">
                     <div className="font-medium">{f.name}</div>
@@ -194,7 +197,16 @@ export function ImportForm() {
               ))}
             </TableBody>
           </DataTable>
-          {possible.length > 300 && <p className="text-xs text-muted-foreground">Showing the first 300; the rest are skipped. Download the duplicates list to see them all.</p>}
+          {possible.length > POSS && (
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+              <span className="tabular-nums">Showing {((possPage - 1) * POSS + 1).toLocaleString("en-US")}–{Math.min(possPage * POSS, possible.length).toLocaleString("en-US")} of {possible.length.toLocaleString("en-US")}</span>
+              <div className="flex items-center gap-1">
+                <Button type="button" variant="outline" size="sm" disabled={possPage <= 1} onClick={() => setPossPage((p) => p - 1)}>Previous</Button>
+                <span className="px-2 tabular-nums">{possPage} / {Math.ceil(possible.length / POSS)}</span>
+                <Button type="button" variant="outline" size="sm" disabled={possPage >= Math.ceil(possible.length / POSS)} onClick={() => setPossPage((p) => p + 1)}>Next</Button>
+              </div>
+            </div>
+          )}
         </section>
       )}
 

@@ -59,3 +59,8 @@ export function dateTime(value: unknown, timeZone = APP_TIMEZONE): string {
   const d = value instanceof Date ? value : new Date(String(value));
   return new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone }).format(d);
 }
+
+/** A relativeDue label for use mid-sentence: "Today" → "today", "In 3 days" → "in 3 days"; "25 Nov" stays as is. */
+export function inlineDue(label: string): string {
+  return label.replace(/^(Today|Tomorrow|In)\b/, (m) => m.toLowerCase());
+}

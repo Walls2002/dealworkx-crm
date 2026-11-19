@@ -1,9 +1,10 @@
 import Link from "next/link";
 import { AlarmClock, CalendarClock, Mail, ThumbsUp } from "lucide-react";
 import { requireUser } from "@/lib/auth";
-import { FOLLOWUPS, listFollowups, viewCounts, type FollowupKind } from "@/lib/data";
+import { FOLLOWUPS, listFollowups, PAGE_SIZE, pageSizeOf, viewCounts, type FollowupKind } from "@/lib/data";
 import { dateTime, todayISO } from "@/lib/dates";
 import { first, withParams, type Params } from "@/lib/url";
+import { clampPage } from "@/lib/paging";
 import { cn } from "@/lib/utils";
 import { TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Avatar } from "./avatar";
@@ -14,6 +15,7 @@ import { LocalTime } from "./local-time";
 import { DataTable, EmptyState, Page, Segments, StatCard, StatGrid, TH, Toolbar } from "./page";
 import { RowActions } from "./row-actions";
 import { RowNav } from "./row-nav";
+import { Pager } from "./pager";
 
 type SearchParams = Promise<Record<string, string | string[] | undefined>>;
 
@@ -23,22 +25,23 @@ export async function FollowupPage({ kind, searchParams }: { kind: FollowupKind;
   const sp = await searchParams;
   const q = first(sp.q).slice(0, 100);
   const leadId = Number(first(sp.lead)) || null;
+  const page = Math.max(1, Number(first(sp.page)) || 1);
+  const size = pageSizeOf(first(sp.size));
   const path = `/${kind}`;
-  const params: Params = { q };
+  const params: Params = { q, page: page > 1 ? String(page) : undefined, size: size === PAGE_SIZE ? undefined : String(size) };
   const { label, outcome } = FOLLOWUPS[kind];
-  const [rows, counts] = await Promise.all([listFollowups(user, kind, q), viewCounts(user)]);
+  const [{ rows, total, callbacksDue, callbacksLater }, counts] = await Promise.all([listFollowups(user, kind, q, page, size), viewCounts(user)]);
+  clampPage(page, total, size, params, path, { lead: leadId ? String(leadId) : undefined });
   const today = todayISO();
   const admin = user.role === "admin";
   const hrefFor = (id: number) => withParams(params, { lead: String(id) }, path);
-  const callbacksDue = rows.filter((r) => r.callbackOn && r.callbackOn <= today).length;
-  const callbacksLater = rows.filter((r) => r.callbackOn && r.callbackOn > today).length;
 
   return (
     <Page>
       <Toolbar left={<SearchBox q={q} placeholder="Search name, company or call notes…" />} />
 
       <StatGrid>
-        <StatCard icon={kind === "interested" ? ThumbsUp : Mail} tone="blue" title={label} value={rows.length} note={`Latest call: ${outcome}`} />
+        <StatCard icon={kind === "interested" ? ThumbsUp : Mail} tone="blue" title={label} value={total} note={`Latest call: ${outcome}`} />
         <StatCard icon={AlarmClock} tone="rose" title="Callbacks due" value={callbacksDue} note="Today or overdue" />
         <StatCard icon={CalendarClock} tone="amber" title="Callbacks booked" value={callbacksLater} note="Scheduled for later" />
       </StatGrid>
@@ -91,6 +94,7 @@ export async function FollowupPage({ kind, searchParams }: { kind: FollowupKind;
           </DataTable>
         )}
       </div>
+      <Pager page={page} total={total} size={size} params={params} path={path} noun={["lead", "leads"]} />
 
       {leadId && (
         <LeadPanelHost user={user} leadId={leadId} ids={rows.map((r) => r.id)} hrefFor={hrefFor} closeHref={withParams(params, {}, path)} listLabel={label} />

@@ -4,13 +4,21 @@ import { db } from "./db";
 import { iso, todayISO } from "./dates";
 import { merge } from "./sequence";
 import { CALL_OUTCOMES } from "./schema";
+import { brevoConfigured, senderProblem } from "./brevo";
+import type { SignatureData } from "./signature";
 
 /** Console views (working a queue) then Lead list views (finding leads). */
 export const VIEWS = ["today", "due", "overdue", "new", "assigned", "unassigned", "all"] as const;
 export type View = (typeof VIEWS)[number];
 export const SORTS = ["due", "name", "company", "owner", "status"] as const;
 export type Sort = (typeof SORTS)[number];
-export const PAGE_SIZE = 100;
+/** Rows per page: a choice of 25, 50 or 100 (?size=), 50 by default. */
+export const PAGE_SIZES = [25, 50, 100] as const;
+export const PAGE_SIZE = 50;
+export function pageSizeOf(v: string): number {
+  const n = Number(v);
+  return (PAGE_SIZES as readonly number[]).includes(n) ? n : PAGE_SIZE;
+}
 
 export type LeadRow = {
   id: number;
@@ -36,28 +44,13 @@ export type LeadRow = {
 // A lead on the "Email only" plan skips the Step 1 LinkedIn message, as in the old Console.
 export const SKIPPED_STEP_SQL = `(s.step_number = 1 and s.channel = 'LinkedIn' and lp.channel_plan = 'Email only')`;
 
-// The next thing owed on a lead: its first unsent step (only while Active), or a callback, whichever is due first.
+// The next thing owed on a lead is stored on the lead itself (lib/cache.ts keeps it current), so this is a plain
+// join that Postgres inlines: filters and sorts hit the leads indexes instead of recomputing every lead.
 const NEXT_ACTION_CTE = /* sql */ `
-  next_step as (
-    select distinct on (ls.lead_id) ls.lead_id, ls.due_on, s.step_number, s.channel
-      from lead_steps ls
-      join sequence_steps s on s.id = ls.step_id
-      join leads lp on lp.id = ls.lead_id
-     where ls.sent_at is null and not ${SKIPPED_STEP_SQL}
-     order by ls.lead_id, s.position
-  ),
-  base as (
-    select l.*, u.name as owner_name,
-           case when l.status = 'Active' and l.disposition not in ('Meeting booked', 'Bounced', 'Requested to unsubscribe')
-                then ns.due_on end as step_due,
-           ns.step_number, ns.channel,
-           case when l.status <> 'Bad' then l.callback_on end as cb_due
-      from leads l
-      left join users u on u.id = l.owner_id
-      left join next_step ns on ns.lead_id = l.id
-  ),
   enriched as (
-    select *, least(step_due, cb_due) as next_due from base
+    select l.*, u.name as owner_name, l.step_channel as channel,
+           case when l.status <> 'Bad' then l.callback_on end as cb_due
+      from leads l left join users u on u.id = l.owner_id
   )`;
 
 function visibility(user: User, params: unknown[]): string {
@@ -91,7 +84,7 @@ function viewClause(view: View, user: User, params: unknown[], today: string): s
 
 export type LeadQuery = {
   view: View; q: string; owner: string; status: string; country?: string; zone?: string;
-  sort: Sort; dir: "asc" | "desc"; page: number;
+  sort: Sort; dir: "asc" | "desc"; page: number; size?: number;
 };
 
 export async function listLeads(user: User, query: LeadQuery) {
@@ -99,9 +92,14 @@ export async function listLeads(user: User, query: LeadQuery) {
   const today = todayISO();
   const params: unknown[] = [];
   const where = [visibility(user, params), viewClause(query.view, user, params, today)];
+  // Search: find the matching leads through the trigram index first, then sort just those.
+  let matched = "";
   if (query.q) {
     params.push(`%${query.q.toLowerCase()}%`);
-    where.push(`lower(first_name || ' ' || last_name || ' ' || company || ' ' || email || ' ' || title) like $${params.length}`);
+    matched = `matched as materialized (
+      select id from leads where lower(first_name || ' ' || last_name || ' ' || company || ' ' || email || ' ' || title) like $${params.length}
+    )`;
+    where.push("id in (select id from matched)");
   }
   if (query.owner && user.role === "admin") {
     if (query.owner === "none") where.push("owner_id is null");
@@ -131,17 +129,18 @@ export async function listLeads(user: User, query: LeadQuery) {
     status: `status ${dir}, next_due nulls last`,
   }[query.sort];
 
-  const sql = `with ${NEXT_ACTION_CTE}
-    select *, count(*) over()::int as total from enriched
-     where ${where.join(" and ")}
-     order by ${order}
-     limit ${PAGE_SIZE} offset ${(Math.max(1, query.page) - 1) * PAGE_SIZE}`;
-  const rows = await d.query<Record<string, unknown>>(sql, params);
-  return {
-    total: rows.length ? Number(rows[0].total) : 0,
-    rows: rows.map(toLeadRow),
-    today,
-  };
+  const size = query.size ?? PAGE_SIZE;
+  const filter = where.join(" and ");
+  // The page and the total run side by side; the page reads only its own rows through the indexes.
+  const [rows, [count]] = await Promise.all([
+    d.query<Record<string, unknown>>(
+      `with ${matched ? `${matched}, ` : ""}${NEXT_ACTION_CTE} select * from enriched where ${filter} order by ${order}
+        limit ${size} offset ${(Math.max(1, query.page) - 1) * size}`,
+      params,
+    ),
+    d.query<{ total: number }>(`${matched ? `with ${matched} ` : ""}select count(*)::int as total from leads where ${filter}`, params),
+  ]);
+  return { total: count.total, rows: rows.map(toLeadRow), today, size };
 }
 
 function toLeadRow(r: Record<string, unknown>): LeadRow {
@@ -175,29 +174,23 @@ export type NavCounts = Record<View, number> & { interested: number; emailReques
 export async function viewCounts(user: User): Promise<NavCounts> {
   const d = await db();
   const today = todayISO();
-  const params: unknown[] = [user.id, today];
   const vis = user.role === "admin" ? "true" : "(owner_id = $1 or owner_id is null)";
-  const [row] = await d.query<Record<View, number>>(
-    `with ${NEXT_ACTION_CTE}
-     select count(*) filter (where owner_id = $1 and next_due <= $2)::int as today,
+  // One pass over leads: every count reads stored columns, including each lead's last call result.
+  const [row] = await d.query<Record<string, number>>(
+    `select count(*) filter (where owner_id = $1 and next_due <= $2)::int as today,
             count(*) filter (where owner_id is not null and next_due = $2)::int as due,
             count(*) filter (where owner_id is not null and next_due < $2)::int as overdue,
             count(*) filter (where owner_id is not null and activated_on = $2)::int as new,
             count(*) filter (where owner_id is not null)::int as assigned,
             count(*) filter (where owner_id is null)::int as unassigned,
-            count(*)::int as "all"
-       from enriched where ${vis}`,
-    params,
+            count(*)::int as "all",
+            count(*) filter (where last_call_outcome = 'Interested')::int as interested,
+            count(*) filter (where last_call_outcome = 'Email requested')::int as email_requested
+       from leads where ${vis}`,
+    [user.id, today],
   );
-  const [follow] = await d.query<{ interested: number; email_requested: number }>(
-    `with ${LAST_CALL_CTE}
-     select count(*) filter (where c.outcome = 'Interested')::int as interested,
-            count(*) filter (where c.outcome = 'Email requested')::int as email_requested
-       from leads l join last_call c on c.lead_id = l.id
-      where ${user.role === "admin" ? "true" : "(l.owner_id = $1 or l.owner_id is null)"}`,
-    user.role === "admin" ? [] : [user.id],
-  );
-  return { ...row, interested: follow.interested, emailRequested: follow.email_requested };
+  const { email_requested, ...rest } = row;
+  return { ...(rest as Record<View, number> & { interested: number }), emailRequested: email_requested };
 }
 
 /** Distinct countries and timezones on leads the user can see, for the list filters. */
@@ -214,15 +207,6 @@ export async function filterOptions(user: User) {
 
 /* ---------- calls: follow-ups and history ---------- */
 
-// Each lead's most recent call.
-const LAST_CALL_CTE = /* sql */ `
-  last_call as (
-    select distinct on (a.lead_id) a.lead_id, a.outcome, a.created_at, a.callback_on, a.body, a.user_id
-      from activities a
-     where a.kind = 'call'
-     order by a.lead_id, a.created_at desc, a.id desc
-  )`;
-
 export const FOLLOWUPS = {
   interested: { outcome: "Interested", label: "Interested Leads" },
   "email-requested": { outcome: "Email requested", label: "Email Requested" },
@@ -236,41 +220,56 @@ export type FollowupRow = {
 };
 
 /** Leads whose latest call ended with the given outcome, newest call first. */
-export async function listFollowups(user: User, kind: FollowupKind, q: string): Promise<FollowupRow[]> {
+export async function listFollowups(user: User, kind: FollowupKind, q: string, page = 1, size = PAGE_SIZE): Promise<{ rows: FollowupRow[]; total: number; callbacksDue: number; callbacksLater: number }> {
   const d = await db();
   const params: unknown[] = [FOLLOWUPS[kind].outcome];
-  const where = ["c.outcome = $1", visibility(user, params).replaceAll("owner_id", "l.owner_id")];
+  const where = ["l.last_call_outcome = $1", visibility(user, params).replaceAll("owner_id", "l.owner_id")];
   if (q) {
     params.push(`%${q.toLowerCase()}%`);
-    where.push(`lower(l.first_name || ' ' || l.last_name || ' ' || l.company || ' ' || l.email || ' ' || c.body) like $${params.length}`);
+    where.push(`(lower(l.first_name || ' ' || l.last_name || ' ' || l.company || ' ' || l.email || ' ' || l.title) like $${params.length}
+                 or lower(c.body) like $${params.length})`);
   }
-  const rows = await d.query<Record<string, unknown>>(
-    `with ${LAST_CALL_CTE}
-     select l.id, l.first_name, l.last_name, l.title, l.company, l.timezone, l.email, l.phone_work, l.phone_mobile, l.phone_corporate, l.phone_home, l.phone_other, l.phone_company, o.name as owner_name,
-            c.created_at as call_at, cu.name as call_by, c.callback_on, c.body
-       from leads l
-       join last_call c on c.lead_id = l.id
-       left join users o on o.id = l.owner_id
-       left join users cu on cu.id = c.user_id
-      where ${where.join(" and ")}
-      order by c.created_at desc
-      limit 500`,
-    params,
-  );
-  return rows.map((r) => ({
-    id: Number(r.id),
-    name: `${r.first_name} ${r.last_name}`.trim() || "(No name)",
-    title: String(r.title ?? ""),
-    company: String(r.company ?? ""),
-    timezone: String(r.timezone ?? ""),
-    ownerName: (r.owner_name as string) ?? null,
-    email: String(r.email ?? ""),
-    phone: String(r.phone_work || r.phone_mobile || r.phone_corporate || r.phone_home || r.phone_other || r.phone_company || ""),
-    callAt: new Date(String(r.call_at)).toISOString(),
-    callBy: (r.call_by as string) ?? "System",
-    callbackOn: iso(r.callback_on),
-    notes: String(r.body ?? ""),
-  }));
+  const filter = where.join(" and ");
+  const [rows, [count]] = await Promise.all([
+    d.query<Record<string, unknown>>(
+      `select l.id, l.first_name, l.last_name, l.title, l.company, l.timezone, l.email, l.phone_work, l.phone_mobile, l.phone_corporate, l.phone_home, l.phone_other, l.phone_company, o.name as owner_name,
+              c.created_at as call_at, cu.name as call_by, c.callback_on, c.body
+         from leads l
+         join activities c on c.id = l.last_call_id
+         left join users o on o.id = l.owner_id
+         left join users cu on cu.id = c.user_id
+        where ${filter}
+        order by l.last_call_at desc
+        limit ${size} offset ${(Math.max(1, page) - 1) * size}`,
+      params,
+    ),
+    d.query<{ total: number; due: number; later: number }>(
+      `select count(*)::int as total,
+              count(*) filter (where c.callback_on <= '${todayISO()}'::date)::int as due,
+              count(*) filter (where c.callback_on > '${todayISO()}'::date)::int as later
+         from leads l join activities c on c.id = l.last_call_id where ${filter}`,
+      params,
+    ),
+  ]);
+  return {
+    total: count.total,
+    callbacksDue: count.due,
+    callbacksLater: count.later,
+    rows: rows.map((r) => ({
+      id: Number(r.id),
+      name: `${r.first_name} ${r.last_name}`.trim() || "(No name)",
+      title: String(r.title ?? ""),
+      company: String(r.company ?? ""),
+      timezone: String(r.timezone ?? ""),
+      ownerName: (r.owner_name as string) ?? null,
+      email: String(r.email ?? ""),
+      phone: String(r.phone_work || r.phone_mobile || r.phone_corporate || r.phone_home || r.phone_other || r.phone_company || ""),
+      callAt: new Date(String(r.call_at)).toISOString(),
+      callBy: (r.call_by as string) ?? "System",
+      callbackOn: iso(r.callback_on),
+      notes: String(r.body ?? ""),
+    })),
+  };
 }
 
 export type CallRow = {
@@ -278,7 +277,7 @@ export type CallRow = {
   outcome: string; phone: string; notes: string; callbackOn: string | null; at: string; by: string;
 };
 
-export type CallQuery = { q: string; outcome: string; leadId: number | null; page: number };
+export type CallQuery = { q: string; outcome: string; leadId: number | null; page: number; size?: number };
 
 /** Every logged call on leads the user can see, newest first. */
 export async function listCalls(user: User, query: CallQuery) {
@@ -297,20 +296,28 @@ export async function listCalls(user: User, query: CallQuery) {
     params.push(`%${query.q.toLowerCase()}%`);
     where.push(`lower(l.first_name || ' ' || l.last_name || ' ' || l.company || ' ' || a.phone || ' ' || a.outcome || ' ' || a.body || ' ' || coalesce(u.name, '')) like $${params.length}`);
   }
-  const rows = await d.query<Record<string, unknown>>(
-    `select a.id, a.lead_id, a.outcome, a.phone, a.body, a.callback_on, a.created_at, u.name as by_name,
-            l.first_name, l.last_name, l.company, o.name as owner_name, count(*) over()::int as total
-       from activities a
-       join leads l on l.id = a.lead_id
-       left join users u on u.id = a.user_id
-       left join users o on o.id = l.owner_id
-      where ${where.join(" and ")}
-      order by a.created_at desc, a.id desc
-      limit ${PAGE_SIZE} offset ${(Math.max(1, query.page) - 1) * PAGE_SIZE}`,
-    params,
-  );
+  const size = query.size ?? PAGE_SIZE;
+  const filter = where.join(" and ");
+  const [rows, [count]] = await Promise.all([
+    d.query<Record<string, unknown>>(
+      `select a.id, a.lead_id, a.outcome, a.phone, a.body, a.callback_on, a.created_at, u.name as by_name,
+              l.first_name, l.last_name, l.company, o.name as owner_name
+         from activities a
+         join leads l on l.id = a.lead_id
+         left join users u on u.id = a.user_id
+         left join users o on o.id = l.owner_id
+        where ${filter}
+        order by a.created_at desc, a.id desc
+        limit ${size} offset ${(Math.max(1, query.page) - 1) * size}`,
+      params,
+    ),
+    d.query<{ total: number }>(
+      `select count(*)::int as total from activities a join leads l on l.id = a.lead_id left join users u on u.id = a.user_id where ${filter}`,
+      params,
+    ),
+  ]);
   return {
-    total: rows.length ? Number(rows[0].total) : 0,
+    total: count.total,
     rows: rows.map((r): CallRow => ({
       id: Number(r.id),
       leadId: Number(r.lead_id),
@@ -395,6 +402,28 @@ export async function listPainPoints() {
   return (await d.query<{ label: string }>("select label from pain_points order by id")).map((r) => r.label);
 }
 
+/* ---------- email signature ---------- */
+
+export const COMPANY_DEFAULTS = { company_name: "DealWorkx", company_website: "dealworkx.com", company_address: "" } as const;
+
+/** Company details for every signature (admin-editable settings), with defaults until they're saved. */
+export async function companyDetails(): Promise<{ company: string; website: string; address: string }> {
+  const d = await db();
+  const rows = await d.query<{ key: string; value: string }>("select key, value from settings where key = any($1::text[])", [Object.keys(COMPANY_DEFAULTS)]);
+  const get = (k: keyof typeof COMPANY_DEFAULTS) => rows.find((r) => r.key === k)?.value ?? COMPANY_DEFAULTS[k];
+  return { company: get("company_name"), website: get("company_website"), address: get("company_address") };
+}
+
+/** One user's signature: their name, title, phone and email, plus the company details. */
+export async function signatureFor(userId: number): Promise<SignatureData> {
+  const d = await db();
+  const [[u], company] = await Promise.all([
+    d.query<{ name: string; email: string; title: string; phone: string }>("select name, email, title, phone from users where id = $1", [userId]),
+    companyDetails(),
+  ]);
+  return { name: u?.name ?? "", email: u?.email ?? "", title: u?.title ?? "", phone: u?.phone ?? "", ...company };
+}
+
 export function canWrite(user: User, ownerId: number | null): boolean {
   return user.role === "admin" || (ownerId != null && ownerId === user.id);
 }
@@ -415,16 +444,24 @@ export async function getLead(user: User, id: number) {
     first_name: String(lead.first_name), last_name: String(lead.last_name), company: String(lead.company),
     title: String(lead.title), pain_point: String(lead.pain_point), sender,
   };
-  const steps = (
-    await d.query<Record<string, unknown>>(
+  // Steps and activity are independent: fetch them side by side (each round trip to the database costs ~50 ms).
+  const [stepRows, activityRows, signature] = await Promise.all([
+    d.query<Record<string, unknown>>(
       `select s.id, s.step_number, s.channel, s.subject, s.body, s.subject_titled, s.body_titled, s.day_offset, ls.due_on, ls.sent_at, su.name as sent_by
          from sequence_steps s
          left join lead_steps ls on ls.step_id = s.id and ls.lead_id = $1
          left join users su on su.id = ls.sent_by
         order by s.position`,
       [id],
-    )
-  ).map((s) => ({
+    ),
+    d.query<Record<string, unknown>>(
+      `select a.*, u.name as user_name from activities a left join users u on u.id = a.user_id
+        where a.lead_id = $1 order by a.created_at desc, a.id desc limit 100`,
+      [id],
+    ),
+    brevoConfigured() ? signatureFor(user.id) : Promise.resolve(null),
+  ]);
+  const steps = stepRows.map((s) => ({
     id: Number(s.id),
     stepNumber: Number(s.step_number),
     channel: String(s.channel) as "Email" | "LinkedIn",
@@ -439,16 +476,11 @@ export async function getLead(user: User, id: number) {
     sentAt: s.sent_at ? new Date(String(s.sent_at)).toISOString() : null,
     sentBy: (s.sent_by as string) ?? null,
   }));
-  const activities = (
-    await d.query<Record<string, unknown>>(
-      `select a.*, u.name as user_name from activities a left join users u on u.id = a.user_id
-        where a.lead_id = $1 order by a.created_at desc, a.id desc limit 100`,
-      [id],
-    )
-  ).map((a) => ({
+  const activities = activityRows.map((a) => ({
     id: Number(a.id),
     kind: String(a.kind),
     outcome: String(a.outcome ?? ""),
+    subject: String(a.subject ?? ""),
     phone: String(a.phone ?? ""),
     body: String(a.body ?? ""),
     callbackOn: iso(a.callback_on),
@@ -499,73 +531,88 @@ export async function getLead(user: User, id: number) {
     activatedOn: iso(lead.activated_on),
     callbackOn: iso(lead.callback_on),
     canWrite: canWrite(user, ownerId),
+    /** Sending from the CRM (Brevo): who it goes out as, or why this user can't send. Hidden when Brevo isn't set up. */
+    mail: signature ? { from: { name: user.name, email: user.email }, problem: senderProblem(user.email), signature } : null,
     steps,
     activities,
   };
 }
 export type LeadDetail = NonNullable<Awaited<ReturnType<typeof getLead>>>;
 
-export async function dashboard(user: User) {
+export async function dashboard(user: User, queuePage = 1) {
   const d = await db();
   const today = todayISO();
+  const tz = process.env.APP_TIMEZONE || "Asia/Singapore";
+  // "Today" as a time range, so the activity and step indexes can be used.
+  const dayStart = `($2::date::timestamp at time zone $3)`, dayEnd = `(($2::date + 1)::timestamp at time zone $3)`;
   // Same visibility as the lists: admins see everything, reps their own leads plus the unassigned pool.
   const scoped = user.role === "admin" ? "true" : `(l.owner_id = ${Number(user.id)} or l.owner_id is null)`;
   const owned = user.role === "admin" ? "l.owner_id is not null" : `l.owner_id = ${Number(user.id)}`;
-
-  const [totals] = await d.query<Record<string, number>>(
-    `with ${NEXT_ACTION_CTE}
-     select count(*)::int as visible,
-            count(*) filter (where l.owner_id is not null and l.status = 'Active')::int as active,
-            count(*) filter (where l.next_due = $1 and l.owner_id is not null)::int as due_today,
-            count(*) filter (where l.next_due < $1 and l.owner_id is not null)::int as overdue,
-            count(*) filter (where l.owner_id is null)::int as unassigned,
-            count(*) filter (where l.disposition = 'Meeting booked')::int as meetings
-       from enriched l where ${scoped}`,
-    [today],
-  );
   const activityScope = user.role === "admin" ? "true" : `a.user_id = ${Number(user.id)}`;
-  const tz = process.env.APP_TIMEZONE || "Asia/Singapore";
-  const outcomes = await d.query<{ outcome: string; n: number }>(
-    `select a.outcome, count(*)::int as n from activities a
-      where a.kind = 'call' and (a.created_at at time zone $2)::date = $1::date and ${activityScope}
-      group by a.outcome order by n desc`,
-    [today, tz],
-  );
-  const reps = await d.query<Record<string, unknown>>(
-    `with ${NEXT_ACTION_CTE}
-     select u.id, u.name, u.role,
-            (select count(*) from enriched e where e.owner_id = u.id and e.status = 'Active')::int as active,
-            (select count(*) from enriched e where e.owner_id = u.id and e.next_due = $1)::int as due_today,
-            (select count(*) from enriched e where e.owner_id = u.id and e.next_due < $1)::int as overdue,
-            (select count(*) from activities a where a.user_id = u.id and a.kind = 'call' and (a.created_at at time zone $2)::date = $1::date)::int as calls_today,
-            (select count(*) from activities a where a.user_id = u.id and a.kind = 'step' and (a.created_at at time zone $2)::date = $1::date)::int as steps_today,
-            (select count(*) from leads l where l.owner_id = u.id and l.disposition = 'Meeting booked')::int as meetings
-       from users u ${user.role === "admin" ? "" : `where u.id = ${Number(user.id)}`}
-      order by u.name`,
-    [today, tz],
-  );
-  // Due and overdue leads, oldest first: the old dashboard's queue.
-  const queue = await d.query<Record<string, unknown>>(
-    `with ${NEXT_ACTION_CTE}
-     select *, count(*) over()::int as total from enriched l
-      where ${owned} and l.next_due <= $1
-      order by l.next_due, l.last_name limit 10`,
-    [today],
-  );
-  const recent = await d.query<Record<string, unknown>>(
-    `select a.id, a.kind, a.outcome, a.body, a.created_at, a.lead_id, u.name as user_name,
-            l.first_name || ' ' || l.last_name as lead_name, l.company
-       from activities a join leads l on l.id = a.lead_id left join users u on u.id = a.user_id
-      where a.kind in ('call', 'step', 'note') and ${activityScope}
-      order by a.created_at desc limit 7`,
-  );
+  const queueSize = 10;
+
+  const [[totals], outcomes, reps, queue, [queueCount], recent] = await Promise.all([
+    d.query<Record<string, number>>(
+      `select count(*)::int as visible,
+              count(*) filter (where l.owner_id is not null and l.status = 'Active')::int as active,
+              count(*) filter (where l.next_due = $1 and l.owner_id is not null)::int as due_today,
+              count(*) filter (where l.next_due < $1 and l.owner_id is not null)::int as overdue,
+              count(*) filter (where l.owner_id is null)::int as unassigned,
+              count(*) filter (where l.disposition = 'Meeting booked')::int as meetings
+         from leads l where ${scoped}`,
+      [today],
+    ),
+    d.query<{ outcome: string; n: number }>(
+      `select a.outcome, count(*)::int as n from activities a
+        where a.kind = 'call' and a.created_at >= ${dayStart} and a.created_at < ${dayEnd} and ${activityScope} and $1::int is not null
+        group by a.outcome order by n desc`,
+      [1, today, tz],
+    ),
+    d.query<Record<string, unknown>>(
+      `with owned as (
+         select owner_id, count(*) filter (where status = 'Active')::int as active,
+                count(*) filter (where next_due = $2)::int as due_today, count(*) filter (where next_due < $2)::int as overdue,
+                count(*) filter (where disposition = 'Meeting booked')::int as meetings
+           from leads where owner_id is not null group by owner_id
+       ), calls as (
+         select user_id, count(*)::int as n from activities where kind = 'call' and created_at >= ${dayStart} and created_at < ${dayEnd} group by user_id
+       ), steps as (
+         select sent_by, count(*)::int as n from lead_steps where sent_at >= ${dayStart} and sent_at < ${dayEnd} group by sent_by
+       )
+       select u.id, u.name, u.role, coalesce(o.active, 0) as active, coalesce(o.due_today, 0) as due_today, coalesce(o.overdue, 0) as overdue,
+              coalesce(o.meetings, 0) as meetings, coalesce(c.n, 0) as calls_today, coalesce(s.n, 0) as steps_today
+         from users u
+         left join owned o on o.owner_id = u.id
+         left join calls c on c.user_id = u.id
+         left join steps s on s.sent_by = u.id
+        where $1::int is not null ${user.role === "admin" ? "" : `and u.id = ${Number(user.id)}`}
+        order by u.name`,
+      [1, today, tz],
+    ),
+    // Due and overdue leads, oldest first: the old dashboard's queue, paged.
+    d.query<Record<string, unknown>>(
+      `with ${NEXT_ACTION_CTE}
+       select * from enriched l where ${owned} and l.next_due <= $1
+        order by l.next_due, l.last_name limit ${queueSize} offset ${(Math.max(1, queuePage) - 1) * queueSize}`,
+      [today],
+    ),
+    d.query<{ total: number }>(`select count(*)::int as total from leads l where ${owned} and l.next_due <= $1`, [today]),
+    d.query<Record<string, unknown>>(
+      `select a.id, a.kind, a.outcome, a.body, a.created_at, a.lead_id, u.name as user_name,
+              l.first_name || ' ' || l.last_name as lead_name, l.company
+         from activities a join leads l on l.id = a.lead_id left join users u on u.id = a.user_id
+        where a.kind in ('call', 'step', 'note', 'email') and ${activityScope}
+        order by a.created_at desc limit 7`,
+    ),
+  ]);
   return {
     today,
     totals,
     outcomes,
     callsToday: outcomes.reduce((n, o) => n + o.n, 0),
     queue: queue.map(toLeadRow),
-    queueTotal: queue.length ? Number(queue[0].total) : 0,
+    queueTotal: queueCount.total,
+    queueSize,
     reps: reps.map((r) => ({
       id: Number(r.id), name: String(r.name), role: String(r.role), active: Number(r.active), dueToday: Number(r.due_today),
       overdue: Number(r.overdue), callsToday: Number(r.calls_today), stepsToday: Number(r.steps_today), meetings: Number(r.meetings),
@@ -605,7 +652,7 @@ export type DuplicateGroup = { reasons: string[]; leads: DuplicateLead[] };
  * Leads that look like the same person: same name + company, same personal phone, same LinkedIn or contact ID.
  * Overlapping matches join into one group; pairs an admin marked "not duplicates" are left out.
  */
-export async function listDuplicateGroups(limit = 100): Promise<{ groups: DuplicateGroup[]; total: number }> {
+export async function listDuplicateGroups(limit = 20, offset = 0): Promise<{ groups: DuplicateGroup[]; total: number }> {
   const d = await db();
   const keys = await d.query<{ reason: string; ids: number[] }>(
     `with k as (
@@ -645,15 +692,17 @@ export async function listDuplicateGroups(limit = 100): Promise<{ groups: Duplic
     if (!reasonsByRoot.has(r)) reasonsByRoot.set(r, new Set());
     reasonsByRoot.get(r)!.add(reason);
   }
-  const roots = [...members.keys()];
-  const shown = roots.slice(0, limit);
+  const roots = [...members.keys()].sort((a, b) => a - b);
+  // Remember the count for the Lead List banner (reading a setting is free; this query is not).
+  await d.query("insert into settings (key, value) values ('duplicate_groups', $1) on conflict (key) do update set value = excluded.value", [String(roots.length)]);
+  const shown = roots.slice(offset, offset + limit);
   const ids = shown.flatMap((r) => [...members.get(r)!]);
   if (!ids.length) return { groups: [], total: roots.length };
 
   const rows = await d.query<Record<string, unknown>>(
     `select l.id, l.first_name, l.last_name, l.title, l.company, l.email, l.email_status, l.status, l.created_at,
             coalesce(nullif(l.phone_mobile, ''), nullif(l.phone_work, ''), l.phone_home) as phone, u.name as owner_name,
-            (select count(*) from activities a where a.lead_id = l.id and a.kind in ('call', 'note', 'step'))::int as activities
+            (select count(*) from activities a where a.lead_id = l.id and a.kind in ('call', 'note', 'step', 'email'))::int as activities
        from leads l left join users u on u.id = l.owner_id where l.id = any($1::int[])`,
     [ids],
   );
@@ -673,4 +722,11 @@ export async function listDuplicateGroups(limit = 100): Promise<{ groups: Duplic
       }),
     })),
   };
+}
+
+/** The duplicate-group count as of the last check (Duplicates page, uploads, merges). */
+export async function duplicateCount(): Promise<number> {
+  const d = await db();
+  const [row] = await d.query<{ value: string }>("select value from settings where key = 'duplicate_groups'");
+  return Number(row?.value ?? 0) || 0;
 }

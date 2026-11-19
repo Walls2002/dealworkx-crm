@@ -12,7 +12,7 @@ import { SidebarTrigger } from "@/components/ui/sidebar";
 import { isActive, TABS, UserMenuContent, type ShellUser } from "./app-sidebar";
 import { Avatar } from "./avatar";
 
-const OTHER: Record<string, string> = { "/sequence": "Sequence", "/import": "Upload leads", "/duplicates": "Duplicates" };
+const OTHER: Record<string, string> = { "/sequence": "Sequence", "/import": "Upload leads", "/duplicates": "Duplicates", "/signature": "Email signature" };
 
 export function SiteHeader({ user, demo }: { user: ShellUser; demo: boolean }) {
   const path = usePathname();

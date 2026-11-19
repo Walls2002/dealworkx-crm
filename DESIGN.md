@@ -9,7 +9,7 @@ system: "shadcn/ui (radix-nova), Tailwind v4, Inter, primary blue oklch(0.585 0.
 On 2026-11-17 the user asked to copy a reference screenshot (a "JV Outreach" CRM). Match it; don't reinterpret it.
 
 ## Shell
-- **Sidebar** (`components/app-sidebar.tsx`), light grey: the DX mark with "DealWorkx / Team CRM", a "Menu" label, then exactly the
+- **Sidebar** (`components/app-sidebar.tsx`), light grey: the logo (`components/logo.tsx`: a vector DX mark redrawn from the brand logo, ink D and green X, beside the plain wordmark "DealWorkx": one line, 17px semibold, -0.02em tracking; no spaced capitals, no coloured letter, no tagline), a "Menu" label, then exactly the
   7 old tabs (Console, Lead List, Interested Leads, Email Requested, Recorded Call History, Call Pipeline, Daily Dashboard),
   each 36px with 13px text. The active item is light blue with blue text, and counts sit on the right. A bordered user card at the
   bottom opens the account menu (Sequence, Import, Sign out).

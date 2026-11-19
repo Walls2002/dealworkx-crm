@@ -1,13 +1,19 @@
 import { requireAdmin } from "@/lib/auth";
 import { listDuplicateGroups } from "@/lib/data";
 import { EmptyState, Page, PageHeader } from "@/components/page";
+import { Pager } from "@/components/pager";
+import { first } from "@/lib/url";
+import { clampPage } from "@/lib/paging";
 import { DuplicateGroupCard } from "./group";
 
 export const metadata = { title: "Duplicates" };
 
-export default async function DuplicatesPage() {
+export default async function DuplicatesPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   await requireAdmin();
-  const { groups, total } = await listDuplicateGroups(100);
+  const page = Math.max(1, Number(first((await searchParams).page)) || 1);
+  const size = 20;
+  const { groups, total } = await listDuplicateGroups(size, (page - 1) * size);
+  clampPage(page, total, size, {}, "/duplicates");
   return (
     <Page className="max-w-6xl">
       <PageHeader
@@ -20,10 +26,11 @@ export default async function DuplicatesPage() {
         </EmptyState>
       ) : (
         <>
-          <p className="text-sm text-muted-foreground">{total} {total === 1 ? "group" : "groups"}{total > groups.length ? `; showing the first ${groups.length}` : ""}.</p>
+
           <div className="grid gap-4">
             {groups.map((g) => <DuplicateGroupCard key={g.leads.map((l) => l.id).join("-")} group={g} />)}
           </div>
+          <Pager page={page} total={total} size={size} params={{ page: page > 1 ? String(page) : undefined }} path="/duplicates" sizes={false} noun={["group", "groups"]} />
         </>
       )}
     </Page>

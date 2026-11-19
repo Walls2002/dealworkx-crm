@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { ArrowRight, Building2, Check, Globe, History, Mail, MessageSquareText, Phone, Send, Upload, UserPlus, X, ListChecks } from "lucide-react";
 import type { Capacity, LeadDetail } from "@/lib/data";
-import { dateTime, relativeDue, shortDate } from "@/lib/dates";
+import { dateTime, inlineDue, relativeDue, shortDate } from "@/lib/dates";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -14,6 +14,7 @@ import { EmailCheckBadge, StatusBadge } from "./badges";
 import { LeadSheet } from "./lead-sheet";
 import { AssignForm, LeadSettingsForm, LogCallForm, NoteForm, StepButton } from "./lead-forms";
 import { CurrentStep } from "./outreach";
+import { LeadEmailActions } from "./send-email";
 import { listCallOutcomes } from "@/lib/data";
 
 type Props = {
@@ -43,11 +44,6 @@ function telHref(n: string) {
   return /^\+?\d{7,15}$/.test(digits) ? `tel:${digits}` : null;
 }
 
-function gmailHref(email: string, subject = "", body = "") {
-  const q = new URLSearchParams({ view: "cm", fs: "1", to: email, su: subject, body });
-  return `https://mail.google.com/mail/?${q}`;
-}
-
 function Section({ title, aside, children }: { title: string; aside?: React.ReactNode; children: React.ReactNode }) {
   return (
     <section className="grid gap-4 px-6 py-5">
@@ -67,6 +63,8 @@ export async function LeadPanel({ lead, nextHref, position, today, closeHref, ad
   const linkedin = safeUrl(lead.linkedin), website = safeUrl(lead.website), companyLinkedin = safeUrl(lead.companyLinkedin);
   const callbackDue = lead.callbackOn ? relativeDue(lead.callbackOn, today) : null;
   const good = lead.disposition === "Meeting booked" || lead.disposition === "Replied";
+  // CRM email is offered only where it would be accepted (the server checks the same rules).
+  const mailable = lead.status !== "Bad" && lead.disposition !== "Bounced" && lead.disposition !== "Requested to unsubscribe";
 
   return (
     <LeadSheet closeHref={closeHref}>
@@ -100,7 +98,7 @@ export async function LeadPanel({ lead, nextHref, position, today, closeHref, ad
           {lead.disposition !== "None" && (
             <Badge variant={good ? "outline" : "destructive"} className={cn(good && "border-green-300 bg-green-50 text-green-800")}>{lead.disposition}</Badge>
           )}
-          {callbackDue && <Badge variant={callbackDue.tone === "overdue" ? "destructive" : "outline"}>Callback {callbackDue.label.toLowerCase()}</Badge>}
+          {callbackDue && <Badge variant={callbackDue.tone === "overdue" ? "destructive" : "outline"}>Callback {inlineDue(callbackDue.label)}</Badge>}
           <Badge variant="outline" className="text-muted-foreground">Owner: <span className="text-foreground">{lead.ownerName ?? "Unassigned"}</span></Badge>
           <Badge variant="outline" className="text-muted-foreground">Channels: <span className="text-foreground">{lead.channelPlan}</span></Badge>
           <Badge variant="outline" className="text-muted-foreground"><LocalTime zone={lead.timezone} long /></Badge>
@@ -117,11 +115,7 @@ export async function LeadPanel({ lead, nextHref, position, today, closeHref, ad
               </Button>
             ) : null;
           })}
-          {lead.email && (
-            <Button variant="outline" className="h-auto min-h-8" asChild>
-              <a href={gmailHref(lead.email)} target="_blank" rel="noopener noreferrer"><Mail /> Gmail</a>
-            </Button>
-          )}
+          {lead.email && <LeadEmailActions leadId={lead.id} email={lead.email} toName={lead.name} mail={mailable ? lead.mail : null} canWrite={lead.canWrite} />}
           {linkedin && (
             <Button variant="outline" className="h-auto min-h-8" asChild>
               <a href={linkedin} target="_blank" rel="noopener noreferrer"><LinkedInIcon className="size-4" /> LinkedIn</a>
@@ -145,7 +139,7 @@ export async function LeadPanel({ lead, nextHref, position, today, closeHref, ad
       {admin && (
         <>
           <Section title={lead.ownerId ? "Reassign" : "Assign this lead"} aside={lead.ownerId ? `Currently ${lead.ownerName}` : "Starts the sequence today"}>
-            <AssignForm leadId={lead.id} users={users} painPoints={painPoints} ownerId={lead.ownerId} painPoint={lead.painPoint} capacity={capacity} />
+            <AssignForm key={`${lead.ownerId}|${lead.painPoint}`} leadId={lead.id} users={users} painPoints={painPoints} ownerId={lead.ownerId} painPoint={lead.painPoint} capacity={capacity} />
           </Section>
           <Separator />
         </>
@@ -155,7 +149,7 @@ export async function LeadPanel({ lead, nextHref, position, today, closeHref, ad
         {!lead.activatedOn ? (
           <p className="text-sm text-muted-foreground">Not started. {admin ? "Assign the lead to schedule its steps." : "An admin assigns leads and starts the sequence."}</p>
         ) : current && sequenceLive ? (
-          <CurrentStep step={current} today={today} leadId={lead.id} canWrite={lead.canWrite} email={lead.email} linkedin={linkedin} />
+          <CurrentStep step={current} today={today} leadId={lead.id} canWrite={lead.canWrite} email={lead.email} toName={lead.name} linkedin={linkedin} mail={mailable ? lead.mail : null} />
         ) : (
           <p className="text-sm text-muted-foreground">
             {!sequenceLive ? `Sequence paused while the lead is ${lead.disposition !== "None" ? lead.disposition.toLowerCase() : lead.status.toLowerCase()}.` : "Every step has been sent."}
@@ -211,10 +205,12 @@ export async function LeadPanel({ lead, nextHref, position, today, closeHref, ad
                   <p>
                     {a.kind === "call" ? (
                       <><span className="font-medium">{a.outcome}</span>{a.phone ? ` · ${a.phone}` : ""}{a.callbackOn ? ` · callback ${shortDate(a.callbackOn)}` : ""}</>
-                    ) : a.kind === "note" ? <span className="font-medium">Comment</span> : a.body}
+                    ) : a.kind === "note" ? <span className="font-medium">Comment</span>
+                      : a.kind === "email" ? <><span className="font-medium">Email sent{a.outcome ? ` · ${a.outcome}` : ""}</span>{a.subject ? ` · ${a.subject}` : ""}</>
+                      : a.body}
                   </p>
                   <p className="text-xs text-muted-foreground">{a.userName} · {dateTime(a.createdAt)}</p>
-                  {(a.kind === "call" || a.kind === "note") && a.body && (
+                  {(a.kind === "call" || a.kind === "note" || a.kind === "email") && a.body && (
                     <p className="mt-1.5 rounded-md bg-muted px-3 py-2 whitespace-pre-wrap text-muted-foreground [overflow-wrap:anywhere]">{a.body}</p>
                   )}
                 </div>
@@ -263,7 +259,7 @@ export async function LeadPanel({ lead, nextHref, position, today, closeHref, ad
         <>
           <Separator />
           <Section title="Lead status, disposition and channel plan">
-            <LeadSettingsForm leadId={lead.id} status={lead.status} disposition={lead.disposition} channelPlan={lead.channelPlan} />
+            <LeadSettingsForm key={`${lead.status}|${lead.disposition}|${lead.channelPlan}`} leadId={lead.id} status={lead.status} disposition={lead.disposition} channelPlan={lead.channelPlan} />
           </Section>
         </>
       )}
@@ -274,6 +270,7 @@ export async function LeadPanel({ lead, nextHref, position, today, closeHref, ad
 const ICONS: Record<string, React.ReactNode> = {
   call: <Phone />,
   note: <MessageSquareText />,
+  email: <Mail />,
   step: <Send />,
   assign: <UserPlus />,
   import: <Upload />,

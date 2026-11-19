@@ -7,7 +7,7 @@ import { CardMenu } from "./row-actions";
 
 /** Page body: padding and vertical rhythm shared by every screen. */
 export function Page({ children, className }: { children: React.ReactNode; className?: string }) {
-  return <main className={cn("flex flex-1 flex-col gap-5 p-4 md:p-6", className)}>{children}</main>;
+  return <div className={cn("flex flex-1 flex-col gap-5 p-4 md:p-6", className)}>{children}</div>;
 }
 
 /** Search on the left, filters and actions on the right. */
@@ -41,7 +41,7 @@ export function StatCard({ icon: Icon, tone, title, value, note, href, linkLabel
         {href ? <CardMenu href={href} label={linkLabel} /> : <MoreHorizontal className="ml-auto size-4 text-transparent" aria-hidden />}
       </div>
       <div className="grid gap-1">
-        <span className="text-2xl font-semibold tabular-nums">{value}</span>
+        <span className="text-2xl font-semibold tabular-nums">{typeof value === "number" ? value.toLocaleString("en-US") : value}</span>
         {note && <span className="text-xs text-muted-foreground">{note}</span>}
       </div>
     </div>
@@ -69,7 +69,7 @@ export function Segments({ items, label }: { items: { label: string; href: strin
         >
           {Icon && <Icon className="size-3.5" />}
           {l}
-          {count !== undefined && <span className="text-xs text-muted-foreground tabular-nums">{count}</span>}
+          {count !== undefined && <span className="text-xs text-muted-foreground tabular-nums">{count.toLocaleString("en-US")}</span>}
         </Link>
       ))}
     </nav>

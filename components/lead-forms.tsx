@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
 import { Textarea } from "@/components/ui/textarea";
 import { CapacityNote } from "./capacity-note";
+import { toast } from "./toast";
 
 export function Status({ state }: { state: FormState }) {
   if (!state) return <span role="status" />;
@@ -125,8 +126,20 @@ export function NoteForm({ leadId }: { leadId: number }) {
   );
 }
 
+/**
+ * For forms keyed on the values they change: a successful save remounts them and clears their state,
+ * so the confirmation goes to the toast, which lives outside the form.
+ */
+export function toastOnSuccess(fn: (prev: FormState, form: FormData) => Promise<FormState>) {
+  return async (prev: FormState, form: FormData) => {
+    const result = await fn(prev, form);
+    if (result?.ok) toast(result.ok);
+    return result;
+  };
+}
+
 export function LeadSettingsForm({ leadId, status, disposition, channelPlan }: { leadId: number; status: string; disposition: string; channelPlan: string }) {
-  const [state, action, pending] = useActionState<FormState, FormData>(updateLeadSettings, null);
+  const [state, action, pending] = useActionState<FormState, FormData>(toastOnSuccess(updateLeadSettings), null);
   return (
     <form action={action} className="grid gap-4 sm:grid-cols-2">
       <input type="hidden" name="leadId" value={leadId} />
@@ -147,14 +160,14 @@ export function LeadSettingsForm({ leadId, status, disposition, channelPlan }: {
       </Field>
       <div className="flex flex-wrap items-center gap-3 sm:col-span-2">
         <Button variant="outline" disabled={pending}>{pending ? "Saving…" : "Save status"}</Button>
-        <Status state={state} />
+        {state?.error && <Status state={state} />}
       </div>
     </form>
   );
 }
 
 export function AssignForm({ leadId, users, painPoints, ownerId, painPoint, capacity }: { leadId: number; users: { id: number; name: string }[]; painPoints: string[]; ownerId: number | null; painPoint: string; capacity?: Capacity | null }) {
-  const [state, action, pending] = useActionState<FormState, FormData>(assignLeads, null);
+  const [state, action, pending] = useActionState<FormState, FormData>(toastOnSuccess(assignLeads), null);
   const [chosen, setChosen] = useState(ownerId ? String(ownerId) : "");
   return (
     <form action={action} className="grid gap-4 sm:grid-cols-2">
@@ -176,7 +189,7 @@ export function AssignForm({ leadId, users, painPoints, ownerId, painPoint, capa
       )}
       <div className="flex flex-wrap items-center gap-3 sm:col-span-2">
         <Button disabled={pending}>{pending ? "Saving…" : ownerId ? "Reassign" : "Assign and start"}</Button>
-        <Status state={state} />
+        {state?.error && <Status state={state} />}
       </div>
     </form>
   );

@@ -11,15 +11,16 @@ import { Button } from "@/components/ui/button";
 import { TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { DataTable, TH } from "@/components/page";
 import { EmailCheckBadge, Pill, StatusBadge } from "@/components/badges";
-import { Status } from "@/components/lead-forms";
+import { Status, toastOnSuccess } from "@/components/lead-forms";
 
 /** One group of look-alike leads: pick the one to keep, then merge the rest into it, or mark them as different people. */
 export function DuplicateGroupCard({ group }: { group: DuplicateGroup }) {
   // Default keep: the lead with an owner and the most history, else the oldest.
   const best = [...group.leads].sort((a, b) => Number(!!b.ownerName) - Number(!!a.ownerName) || b.activities - a.activities || a.id - b.id)[0];
   const [keep, setKeep] = useState(best.id);
-  const [mergeState, merge, merging] = useActionState<FormState, FormData>(mergeLeads, null);
-  const [dismissState, dismiss, dismissing] = useActionState<FormState, FormData>(dismissDuplicates, null);
+  // On success the group leaves the list (and this card with it), so the confirmation goes to the toast.
+  const [mergeState, merge, merging] = useActionState<FormState, FormData>(toastOnSuccess(mergeLeads), null);
+  const [dismissState, dismiss, dismissing] = useActionState<FormState, FormData>(toastOnSuccess(dismissDuplicates), null);
   const ids = group.leads.map((l) => l.id);
 
   return (

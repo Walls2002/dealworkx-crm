@@ -1,8 +1,9 @@
 import Link from "next/link";
 import { AlarmClock, ArrowRight, CalendarCheck, ChevronDown, UserPlus } from "lucide-react";
 import { requireUser } from "@/lib/auth";
-import { capacity, filterOptions, getLead, listLeads, listPainPoints, listUsers, PAGE_SIZE, SORTS, viewCounts, VIEWS, type Sort, type View } from "@/lib/data";
+import { capacity, filterOptions, getLead, listLeads, listPainPoints, listUsers, PAGE_SIZE, pageSizeOf, SORTS, viewCounts, VIEWS, type Sort, type View } from "@/lib/data";
 import { first, withParams, type Params } from "@/lib/url";
+import { clampPage } from "@/lib/paging";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { LeadTable } from "@/components/lead-table";
@@ -44,6 +45,7 @@ export default async function ConsolePage({ searchParams }: { searchParams: Prom
   const sort = (SORTS as readonly string[]).includes(first(sp.sort)) ? (first(sp.sort) as Sort) : "due";
   const dir = first(sp.dir) === "desc" ? "desc" : "asc";
   const page = Math.max(1, Number(first(sp.page)) || 1);
+  const size = pageSizeOf(first(sp.size));
   const q = first(sp.q).slice(0, 100);
   const owner = first(sp.owner);
   const zone = first(sp.zone).slice(0, 100);
@@ -53,10 +55,11 @@ export default async function ConsolePage({ searchParams }: { searchParams: Prom
   const params: Params = {
     view: view === "today" ? undefined : view, q, owner, zone,
     sort: sort === "due" ? undefined : sort, dir: dir === "asc" ? undefined : dir, page: page > 1 ? String(page) : undefined,
+    size: size === PAGE_SIZE ? undefined : String(size),
   };
 
   const [{ rows, total, today }, users, painPoints, lead, options, cap, counts] = await Promise.all([
-    listLeads(user, { view, q, owner, status: "", zone, sort, dir, page }),
+    listLeads(user, { view, q, owner, status: "", zone, sort, dir, page, size }),
     listUsers(),
     admin ? listPainPoints() : Promise.resolve([] as string[]),
     leadId ? getLead(user, leadId) : Promise.resolve(null),
@@ -64,6 +67,7 @@ export default async function ConsolePage({ searchParams }: { searchParams: Prom
     admin ? capacity() : Promise.resolve(null),
     viewCounts(user),
   ]);
+  clampPage(page, total, size, params, "/", { lead: leadId ? String(leadId) : undefined });
   const people = users.map((u) => ({ id: u.id, name: u.name }));
   const ids = rows.map((r) => r.id);
   const open = (id: number) => withParams(params, { lead: String(id) });
@@ -71,9 +75,9 @@ export default async function ConsolePage({ searchParams }: { searchParams: Prom
   // Next lead: the row after the open one, or the top of the queue when none is open.
   const at = lead ? ids.indexOf(lead.id) : -1;
   const nextId = lead ? (at >= 0 ? ids[at + 1] : ids.find((id) => id !== lead.id)) : ids[0];
-  const position = lead && at >= 0 ? `${TASKS[view]} · ${(page - 1) * PAGE_SIZE + at + 1} of ${total}` : TASKS[view];
+  const position = lead && at >= 0 ? `${TASKS[view]} · ${((page - 1) * size + at + 1).toLocaleString("en-US")} of ${total.toLocaleString("en-US")}` : TASKS[view];
   const filtered = Boolean(q || owner || zone);
-  const segHref = (v: View) => withParams({ q, owner, zone }, { view: v === "today" ? undefined : v });
+  const segHref = (v: View) => withParams({ q, owner, zone, size: params.size }, { view: v === "today" ? undefined : v });
 
   return (
     <Page>
@@ -141,7 +145,7 @@ export default async function ConsolePage({ searchParams }: { searchParams: Prom
           }
         />
       </div>
-      <Pager page={page} total={total} params={params} path="/" noun={["lead", "leads"]} />
+      <Pager page={page} total={total} size={size} params={params} path="/" noun={["lead", "leads"]} />
 
       {leadId && (lead ? (
         <LeadPanel key={lead.id} lead={lead} nextHref={nextId ? open(nextId) : null} position={position} today={today} closeHref={withParams(params, {})} admin={admin} users={people} painPoints={painPoints} capacity={cap} />

@@ -1,9 +1,10 @@
 import Link from "next/link";
 import { CopyCheck, Gauge, Inbox, Upload, Users } from "lucide-react";
 import { requireUser } from "@/lib/auth";
-import { capacity, filterOptions, getLead, listDuplicateGroups, listLeads, listPainPoints, listUsers, PAGE_SIZE, SORTS, viewCounts, type Sort } from "@/lib/data";
+import { capacity, filterOptions, getLead, duplicateCount, listLeads, listPainPoints, listUsers, PAGE_SIZE, pageSizeOf, SORTS, viewCounts, type Sort } from "@/lib/data";
 import { LEAD_STATUSES } from "@/lib/schema";
 import { first, withParams, type Params } from "@/lib/url";
+import { clampPage } from "@/lib/paging";
 import { Button } from "@/components/ui/button";
 import { CapacityNote } from "@/components/capacity-note";
 import { LeadPanel } from "@/components/lead-panel";
@@ -21,6 +22,7 @@ export default async function LeadListPage({ searchParams }: { searchParams: Pro
   const sort = (SORTS as readonly string[]).includes(first(sp.sort)) ? (first(sp.sort) as Sort) : "name";
   const dir = first(sp.dir) === "desc" ? "desc" : "asc";
   const page = Math.max(1, Number(first(sp.page)) || 1);
+  const size = pageSizeOf(first(sp.size));
   const q = first(sp.q).slice(0, 100);
   const status = (LEAD_STATUSES as readonly string[]).includes(first(sp.status)) ? first(sp.status) : "";
   const country = first(sp.country).slice(0, 100);
@@ -28,18 +30,19 @@ export default async function LeadListPage({ searchParams }: { searchParams: Pro
   const leadId = Number(first(sp.lead)) || null;
   const admin = user.role === "admin";
 
-  const params: Params = { q, status, country, zone, sort: sort === "name" ? undefined : sort, dir: dir === "asc" ? undefined : dir, page: page > 1 ? String(page) : undefined };
+  const params: Params = { q, status, country, zone, sort: sort === "name" ? undefined : sort, dir: dir === "asc" ? undefined : dir, page: page > 1 ? String(page) : undefined, size: size === PAGE_SIZE ? undefined : String(size) };
 
-  const [{ rows, total, today }, users, painPoints, lead, options, cap, counts] = await Promise.all([
-    listLeads(user, { view: "unassigned", q, owner: "", status, country, zone, sort, dir, page }),
+  const [{ rows, total, today }, users, painPoints, lead, options, cap, counts, dupes] = await Promise.all([
+    listLeads(user, { view: "unassigned", q, owner: "", status, country, zone, sort, dir, page, size }),
     listUsers(),
     admin ? listPainPoints() : Promise.resolve([] as string[]),
     leadId ? getLead(user, leadId) : Promise.resolve(null),
     filterOptions(user),
     capacity(),
     viewCounts(user),
+    admin ? duplicateCount() : Promise.resolve(0),
   ]);
-  const dupes = admin ? (await listDuplicateGroups(0)).total : 0;
+  clampPage(page, total, size, params, "/leads", { lead: leadId ? String(leadId) : undefined });
   const people = users.map((u) => ({ id: u.id, name: u.name }));
   const ids = rows.map((r) => r.id);
   const at = lead ? ids.indexOf(lead.id) : -1;
@@ -92,7 +95,7 @@ export default async function LeadListPage({ searchParams }: { searchParams: Pro
           <Segments
             label="Lead status"
             items={[{ label: "All", value: "" }, ...LEAD_STATUSES.map((s) => ({ label: s, value: s }))].map(({ label, value }) => ({
-              label, href: withParams({ q, country, zone }, { status: value || undefined }, "/leads"), active: status === value,
+              label, href: withParams({ q, country, zone, size: params.size }, { status: value || undefined }, "/leads"), active: status === value,
             }))}
           />
           {!admin && <CapacityNote capacity={cap} ownerId={user.id} ownerName="You" className="text-xs" />}
@@ -129,14 +132,14 @@ export default async function LeadListPage({ searchParams }: { searchParams: Pro
           }
         />
       </div>
-      <Pager page={page} total={total} params={params} path="/leads" noun={["lead", "leads"]} />
+      <Pager page={page} total={total} size={size} params={params} path="/leads" noun={["lead", "leads"]} />
 
       {leadId && (lead ? (
         <LeadPanel
           key={lead.id}
           lead={lead}
           nextHref={nextId ? withParams(params, { lead: String(nextId) }, "/leads") : null}
-          position={at >= 0 ? `Lead List · ${(page - 1) * PAGE_SIZE + at + 1} of ${total}` : "Lead List"}
+          position={at >= 0 ? `Lead List · ${((page - 1) * size + at + 1).toLocaleString("en-US")} of ${total.toLocaleString("en-US")}` : "Lead List"}
           today={today}
           closeHref={withParams(params, {}, "/leads")}
           admin={admin}
