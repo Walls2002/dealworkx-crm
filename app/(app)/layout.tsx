@@ -1,3 +1,4 @@
+import { cookies } from "next/headers";
 import { requireUser } from "@/lib/auth";
 import { viewCounts } from "@/lib/data";
 import { isDemo } from "@/lib/mode";
@@ -8,9 +9,11 @@ import { Toaster } from "@/components/toast";
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const user = await requireUser();
-  const counts = await viewCounts(user);
+  const [counts, jar] = await Promise.all([viewCounts(user), cookies()]);
+  // The sidebar remembers whether it was collapsed (the shadcn sidebar writes this cookie on toggle).
+  const open = jar.get("sidebar_state")?.value !== "false";
   return (
-    <SidebarProvider>
+    <SidebarProvider defaultOpen={open}>
       <AppSidebar user={{ name: user.name, email: user.email, admin: user.role === "admin" }} counts={counts} />
       <SidebarInset>
         <SiteHeader user={{ name: user.name, email: user.email, admin: user.role === "admin" }} demo={isDemo()} />

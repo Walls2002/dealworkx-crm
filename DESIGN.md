@@ -27,3 +27,7 @@ On 2026-11-17 the user asked to copy a reference screenshot (a "JV Outreach" CRM
 
 ## Lead record
 A right-hand shadcn `Sheet` (`components/lead-sheet.tsx`, up to `max-w-xl`) driven by the `?lead=` parameter.
+
+## Additions (2026-11-20)
+- **Sidebar** collapses to an icon rail (`collapsible="icon"`): header toggle, Ctrl+B, state kept in the `sidebar_state` cookie, tooltips on every item. Admins get one more item, **Team**, in a separate "Admin" group under the 7 tabs.
+- **Sign-in screens** (`components/auth-shell.tsx`, `auth-styles.ts`): the user chose the "professional" theme here only. Poppins, yellow `#FECE14` fills with black text, ink `#111827`, black focus rings (yellow is too faint on white). Black brand panel left (DX lockup, "Work the list. Book the meeting."), form right; panel hidden on phones.

@@ -7,18 +7,21 @@ import { checkHeader, LEAD_COLUMNS, mapRow, type ImportedLead } from "./csv";
 import { db, type Db } from "./db";
 import { canWrite, COMPANY_DEFAULTS, listCallOutcomes, listDuplicateGroups, signatureFor } from "./data";
 import { iso, isValidISODate, isValidTimeZone, todayISO } from "./dates";
-import { verifyPassword } from "./password";
+import { hashPassword, verifyPassword } from "./password";
+import { cookies } from "next/headers";
+import { appOrigin, brevoConfigured, createToken, linkFor, onTeamDomain, passwordProblem, readToken, sendInviteEmail, sendResetEmail } from "./accounts";
 import { CHANNEL_PLANS, DISPOSITIONS, LEAD_STATUSES, REQUIRED_OUTCOMES } from "./schema";
 import { guessTimezone } from "./timezones";
 import { readWorkbook, type Sheet } from "./workbook";
 import { DuplicateIndex, emailCheck, linkedinKey, type Candidate, type Match } from "./dedupe";
 import { scheduleSteps } from "./sequence";
 import { refreshLastCall, refreshNextActions } from "./cache";
-import { publicAppUrl, sendBrevoEmail, senderProblem } from "./brevo";
+import { publicAppUrl, sendBrevoEmail, senderDomain, senderProblem } from "./brevo";
 import { cleanEmailHtml, emailDocument, textToHtml } from "./email-html";
 import { signatureHtml, signatureText } from "./signature";
 
-export type FormState = { ok?: string; error?: string } | null;
+/** `link`: an invite link to show the admin (to copy) alongside or instead of the email. */
+export type FormState = { ok?: string; error?: string; link?: string } | null;
 
 function str(form: FormData, key: string, max = 4000): string {
   return String(form.get(key) ?? "").trim().slice(0, max);
@@ -53,9 +56,193 @@ export async function login(_: FormState, form: FormData): Promise<FormState> {
   if (!email || !password) return { error: "Enter your email and password." };
   const d = await db();
   const [user] = await d.query<{ id: number; password_hash: string }>("select id, password_hash from users where lower(email) = $1", [email]);
+  if (user && !user.password_hash) return { error: "This account isn't set up yet. Use the link in your invite email, or ask an admin to resend it." };
   if (!user || !(await verifyPassword(password, user.password_hash))) return { error: "That email and password don't match an account." };
   await createSession(user.id);
   redirect("/");
+}
+
+/* ---------- passwords ---------- */
+
+/** Signed in: change your own password. Other devices are signed out; this one stays signed in. */
+export async function changePassword(_: FormState, form: FormData): Promise<FormState> {
+  try {
+    const user = await requireUser();
+    const current = String(form.get("current") ?? "");
+    const next = String(form.get("password") ?? "");
+    const problem = passwordProblem(next, String(form.get("confirm") ?? ""));
+    if (problem) return { error: problem };
+    const d = await db();
+    const [row] = await d.query<{ password_hash: string }>("select password_hash from users where id = $1", [user.id]);
+    if (!row || !(await verifyPassword(current, row.password_hash))) return { error: "Your current password isn't right." };
+    if (current === next) return { error: "Choose a password different from your current one." };
+    const session = (await cookies()).get("dwx_session")?.value ?? "";
+    await d.transaction(async (tx) => {
+      await tx.query("update users set password_hash = $2 where id = $1", [user.id, await hashPassword(next)]);
+      await tx.query("delete from sessions where user_id = $1 and id <> $2", [user.id, session]);
+    });
+    return { ok: "Password changed. You're still signed in here; other devices were signed out." };
+  } catch (e) {
+    return failed(e);
+  }
+}
+
+/**
+ * Forgot password: email a one-hour reset link. The reply is the same whether or not the email has an account,
+ * so the form can't be used to find out who works here. At most 3 links per account per hour.
+ */
+export async function requestPasswordReset(_: FormState, form: FormData): Promise<FormState> {
+  try {
+    const email = str(form, "email", 200).toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { error: "Enter your work email address." };
+    if (!brevoConfigured()) return { error: "Password reset emails aren't set up yet. Ask an admin to reset your access." };
+    const sent = { ok: `If ${email} has an account, a reset link is on its way. Check your inbox (and spam) in a minute.` };
+    const d = await db();
+    const [user] = await d.query<{ id: number; name: string; email: string; password_hash: string }>(
+      "select id, name, email, password_hash from users where lower(email) = $1",
+      [email],
+    );
+    if (!user) return sent;
+    const [{ recent }] = await d.query<{ recent: number }>(
+      "select count(*)::int as recent from auth_tokens where user_id = $1 and created_at > now() - interval '1 hour'",
+      [user.id],
+    );
+    if (recent >= 3) return sent;
+    // Someone still on an invite gets a fresh invite link instead: same page, same outcome.
+    const purpose = user.password_hash ? "reset" : "invite";
+    const raw = await createToken(d, Number(user.id), purpose);
+    const url = linkFor(await appOrigin(), raw);
+    if (purpose === "reset") await sendResetEmail({ name: user.name, email: user.email }, url);
+    else await sendInviteEmail({ name: user.name, email: user.email }, "Your admin", url);
+    return sent;
+  } catch (e) {
+    return failed(e);
+  }
+}
+
+/** From an invite or reset link: set the password, sign every old session out, and sign in here. */
+export async function setPasswordFromLink(_: FormState, form: FormData): Promise<FormState> {
+  let userId = 0;
+  try {
+    const raw = String(form.get("token") ?? "");
+    const password = String(form.get("password") ?? "");
+    const problem = passwordProblem(password, String(form.get("confirm") ?? ""));
+    if (problem) return { error: problem };
+    const hash = await hashPassword(password);
+    const d = await db();
+    await d.transaction(async (tx) => {
+      const info = await readToken(tx, raw, true);
+      if (!info) throw new Error("This link has expired or was already used. Ask for a new one.");
+      userId = info.userId;
+      await tx.query("update users set password_hash = $2, activated_at = coalesce(activated_at, now()) where id = $1", [userId, hash]);
+      await tx.query("update auth_tokens set used_at = now() where user_id = $1 and used_at is null", [userId]);
+      await tx.query("delete from sessions where user_id = $1", [userId]);
+    });
+    await createSession(userId);
+  } catch (e) {
+    return failed(e);
+  }
+  redirect("/");
+}
+
+/* ---------- team (admin) ---------- */
+
+const ROLES = ["admin", "rep"] as const;
+
+/** Invite a teammate on the company domain: their account is created now, and they set a password from the link. */
+export async function inviteMember(_: FormState, form: FormData): Promise<FormState> {
+  try {
+    const admin = await requireAdmin();
+    const name = str(form, "name", 80);
+    const email = str(form, "email", 200).toLowerCase();
+    const role = str(form, "role");
+    if (!name) return { error: "Enter their name." };
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { error: "Enter a valid email address." };
+    if (!onTeamDomain(email)) return { error: `Invites are for ${senderDomain()} addresses only.` };
+    if (!(ROLES as readonly string[]).includes(role)) return { error: "Choose a role." };
+    const d = await db();
+    const [existing] = await d.query<{ password_hash: string }>("select password_hash from users where lower(email) = $1", [email]);
+    if (existing) return { error: existing.password_hash ? `${email} already has an account.` : `${email} is already invited. Use Resend invite in the list.` };
+    let raw = "";
+    await d.transaction(async (tx) => {
+      const [u] = await tx.query<{ id: number }>(
+        "insert into users (email, name, role, password_hash, invited_at) values ($1, $2, $3, '', now()) returning id",
+        [email, name, role],
+      );
+      raw = await createToken(tx, Number(u.id), "invite");
+    });
+    const url = linkFor(await appOrigin(), raw);
+    revalidatePath("/team");
+    if (!brevoConfigured()) return { ok: `${name} is invited. Email isn't set up, so send them this link yourself.`, link: url };
+    try {
+      await sendInviteEmail({ name, email }, admin.name, url);
+    } catch (e) {
+      return { ok: `${name} is invited, but the email didn't send (${e instanceof Error ? e.message : "Brevo error"}). Send them this link yourself.`, link: url };
+    }
+    return { ok: `Invite sent to ${email}. The link works for 7 days.`, link: url };
+  } catch (e) {
+    return failed(e);
+  }
+}
+
+export async function resendInvite(_: FormState, form: FormData): Promise<FormState> {
+  try {
+    const admin = await requireAdmin();
+    const id = Number(form.get("userId"));
+    const d = await db();
+    const [u] = await d.query<{ name: string; email: string; password_hash: string }>("select name, email, password_hash from users where id = $1", [id]);
+    if (!u) return { error: "That person is no longer in the list. Refresh the page." };
+    if (u.password_hash) return { error: `${u.name} has already set a password.` };
+    const url = linkFor(await appOrigin(), await createToken(d, id, "invite"));
+    await d.query("update users set invited_at = now() where id = $1", [id]);
+    revalidatePath("/team");
+    if (!brevoConfigured()) return { ok: "New link created. Email isn't set up, so send it yourself.", link: url };
+    await sendInviteEmail({ name: u.name, email: u.email }, admin.name, url);
+    return { ok: `New invite sent to ${u.email}. Older links no longer work.`, link: url };
+  } catch (e) {
+    return failed(e);
+  }
+}
+
+/** Withdraw an invite nobody has accepted: the pending account is removed. */
+export async function cancelInvite(_: FormState, form: FormData): Promise<FormState> {
+  try {
+    await requireAdmin();
+    const id = Number(form.get("userId"));
+    const d = await db();
+    const [u] = await d.query<{ email: string }>("delete from users where id = $1 and password_hash = '' returning email", [id]);
+    if (!u) return { error: "That invite was already accepted or removed. Refresh the page." };
+    return done(`Invite for ${u.email} cancelled.`);
+  } catch (e) {
+    return failed(e);
+  }
+}
+
+/** Make someone an admin or a member. You can't change your own role, and the last admin always stays an admin. */
+export async function setRole(_: FormState, form: FormData): Promise<FormState> {
+  try {
+    const admin = await requireAdmin();
+    const id = Number(form.get("userId"));
+    const role = str(form, "role");
+    if (!(ROLES as readonly string[]).includes(role)) return { error: "Choose Admin or Member." };
+    if (id === admin.id) return { error: "You can't change your own role. Ask another admin." };
+    const d = await db();
+    let name = "";
+    await d.transaction(async (tx) => {
+      await tx.query("select pg_advisory_xact_lock(4242003)");
+      const [u] = await tx.query<{ name: string; role: string }>("select name, role from users where id = $1 for update", [id]);
+      if (!u) throw new Error("That person is no longer in the list. Refresh the page.");
+      name = u.name;
+      if (u.role === "admin" && role === "rep") {
+        const [{ n }] = await tx.query<{ n: number }>("select count(*)::int as n from users where role = 'admin' and id <> $1", [id]);
+        if (n === 0) throw new Error("Keep at least one admin.");
+      }
+      await tx.query("update users set role = $2 where id = $1", [id, role]);
+    });
+    return done(`${name} is now ${role === "admin" ? "an admin" : "a member"}.`);
+  } catch (e) {
+    return failed(e);
+  }
 }
 
 export async function logout(): Promise<void> {
@@ -73,7 +260,7 @@ export async function assignLeads(_: FormState, form: FormData): Promise<FormSta
     const painPoint = str(form, "painPoint", 300);
     if (!ids.length || ids.length > 200) return { error: "Select between 1 and 200 leads." };
     const d = await db();
-    const [owner] = await d.query<{ id: number; name: string }>("select id, name from users where id = $1", [ownerId]);
+    const [owner] = await d.query<{ id: number; name: string }>("select id, name from users where id = $1 and password_hash <> ''", [ownerId]);
     if (!owner) return { error: "Choose who the leads go to." };
     const known = (await d.query<{ label: string }>("select label from pain_points")).map((p) => p.label);
     if (!known.includes(painPoint)) return { error: "Choose the Step 1 pain point." };

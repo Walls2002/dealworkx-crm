@@ -394,12 +394,39 @@ export async function capacity(): Promise<Capacity> {
 
 export async function listUsers() {
   const d = await db();
-  return d.query<{ id: number; name: string; email: string; role: string }>("select id, name, email, role from users order by name");
+  // People still on an invite can't be given leads until they've set a password.
+  return d.query<{ id: number; name: string; email: string; role: string }>("select id, name, email, role from users where password_hash <> '' order by name");
 }
 
 export async function listPainPoints() {
   const d = await db();
   return (await d.query<{ label: string }>("select label from pain_points order by id")).map((r) => r.label);
+}
+
+/* ---------- team ---------- */
+
+export type TeamMember = {
+  id: number; name: string; email: string; role: "admin" | "rep"; status: "active" | "invited";
+  invitedAt: string | null; inviteExpired: boolean; leads: number;
+};
+
+/** Everyone with an account or a pending invite, admins first, then by name. */
+export async function listTeam(): Promise<TeamMember[]> {
+  const d = await db();
+  const rows = await d.query<Record<string, unknown>>(
+    `select u.id, u.name, u.email, u.role, u.password_hash = '' as invited, u.invited_at,
+            not exists (select 1 from auth_tokens t where t.user_id = u.id and t.purpose = 'invite' and t.used_at is null and t.expires_at > now()) as expired,
+            (select count(*) from leads l where l.owner_id = u.id)::int as leads
+       from users u
+      order by (u.password_hash = ''), u.role, lower(u.name)`,
+  );
+  return rows.map((r) => ({
+    id: Number(r.id), name: String(r.name), email: String(r.email), role: r.role === "admin" ? "admin" : "rep",
+    status: r.invited ? "invited" : "active",
+    invitedAt: r.invited_at ? new Date(String(r.invited_at)).toISOString() : null,
+    inviteExpired: Boolean(r.invited && r.expired),
+    leads: Number(r.leads),
+  }));
 }
 
 /* ---------- email signature ---------- */
@@ -585,7 +612,7 @@ export async function dashboard(user: User, queuePage = 1) {
          left join owned o on o.owner_id = u.id
          left join calls c on c.user_id = u.id
          left join steps s on s.sent_by = u.id
-        where $1::int is not null ${user.role === "admin" ? "" : `and u.id = ${Number(user.id)}`}
+        where $1::int is not null and u.password_hash <> '' ${user.role === "admin" ? "" : `and u.id = ${Number(user.id)}`}
         order by u.name`,
       [1, today, tz],
     ),

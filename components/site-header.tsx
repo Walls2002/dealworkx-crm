@@ -12,7 +12,7 @@ import { SidebarTrigger } from "@/components/ui/sidebar";
 import { isActive, TABS, UserMenuContent, type ShellUser } from "./app-sidebar";
 import { Avatar } from "./avatar";
 
-const OTHER: Record<string, string> = { "/sequence": "Sequence", "/import": "Upload leads", "/duplicates": "Duplicates", "/signature": "Email signature" };
+const OTHER: Record<string, string> = { "/sequence": "Sequence", "/import": "Upload leads", "/duplicates": "Duplicates", "/signature": "Email signature", "/team": "Team", "/account": "My account" };
 
 export function SiteHeader({ user, demo }: { user: ShellUser; demo: boolean }) {
   const path = usePathname();
@@ -38,7 +38,7 @@ export function SiteHeader({ user, demo }: { user: ShellUser; demo: boolean }) {
 
   return (
     <header className="sticky top-0 z-20 flex h-14 shrink-0 items-center gap-2 border-b bg-background px-4 lg:px-6">
-      <SidebarTrigger className="-ml-1 md:hidden" />
+      <SidebarTrigger className="-ml-1" title="Collapse or expand the sidebar (Ctrl+B)" />
       <h1 className="truncate text-[15px] font-semibold">{title}</h1>
       <div className="ml-auto flex items-center gap-2">
         {demo && <Badge variant="secondary" className="hidden font-normal text-muted-foreground lg:inline-flex">Demo data</Badge>}

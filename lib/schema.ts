@@ -178,6 +178,19 @@ end $$;
 alter table users add column if not exists title text not null default '';
 alter table users add column if not exists phone text not null default '';
 
+-- Invites and password resets. An invited user has an empty password_hash until they set one from the invite link.
+alter table users add column if not exists invited_at timestamptz;
+alter table users add column if not exists activated_at timestamptz;
+create table if not exists auth_tokens (
+  token_hash text primary key,                      -- sha256 of the token in the emailed link; the token itself is never stored
+  user_id    int not null references users(id) on delete cascade,
+  purpose    text not null check (purpose in ('invite', 'reset')),
+  expires_at timestamptz not null,
+  used_at    timestamptz,
+  created_at timestamptz not null default now()
+);
+create index if not exists auth_tokens_user_idx on auth_tokens(user_id, created_at desc);
+
 -- Admin-editable settings (daily limits). Blank value = no limit.
 create table if not exists settings (
   key   text primary key,
