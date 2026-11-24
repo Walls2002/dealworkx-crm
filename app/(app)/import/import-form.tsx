@@ -7,18 +7,27 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
 import { Label } from "@/components/ui/label";
 import { TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { DataTable, TH } from "@/components/page";
 import { Pill } from "@/components/badges";
 import { Status } from "@/components/lead-forms";
 
+const RESULT: Record<FlaggedRow["kind"], string> = {
+  definite: "Duplicate (skipped)",
+  update: "Updates the existing lead",
+  possible: "Possible duplicate (you decide)",
+};
+
+type Decision = "skip" | "new" | "update";
+
 /** The flagged rows as a CSV that opens in Excel, so the duplicates can be checked before importing. */
 function downloadFlagged(rows: FlaggedRow[], file: string) {
   const esc = (v: string | number) => `"${String(v).replace(/"/g, '""')}"`;
   const lines = [
     ["Sheet", "Row", "Name", "Company", "Email", "Result", "Reason", "Matches"].map(esc).join(","),
-    ...rows.map((r) => [r.sheet, r.row, r.name, r.company, r.email, r.kind === "definite" ? "Duplicate (skipped)" : "Possible duplicate", r.reason, r.matches].map(esc).join(",")),
+    ...rows.map((r) => [r.sheet, r.row, r.name, r.company, r.email, RESULT[r.kind], r.reason, r.matches].map(esc).join(",")),
   ];
   const blob = new Blob(["﻿" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
   const a = document.createElement("a");
@@ -37,32 +46,37 @@ export function ImportForm() {
   const [preview, check, checking] = useActionState<PreviewState, FormData>(previewImport, null);
   const [result, run, importing] = useActionState<ImportState, FormData>(importLeads, null);
   const [picked, setPicked] = useState<Set<string>>(new Set());
-  const [allow, setAllow] = useState<Set<string>>(new Set());
+  const [decisions, setDecisions] = useState<Map<string, Decision>>(new Map());
   const [file, setFile] = useState<File | null>(null);
   const [possPage, setPossPage] = useState(1);
   const POSS = 50;
 
-  // Pre-tick every sheet that follows the template and has new leads; possible duplicates start as "skip".
+  // Pre-tick every sheet that follows the template and has something to bring in; possible duplicates start as "skip".
   useEffect(() => {
-    setPicked(new Set((preview?.sheets ?? []).filter((s) => !s.missingRequired.length && s.fresh + s.possible > 0).map((s) => s.name)));
-    setAllow(new Set());
+    setPicked(new Set((preview?.sheets ?? []).filter((s) => !s.missingRequired.length && s.fresh + s.updates + s.possible > 0).map((s) => s.name)));
+    setDecisions(new Map());
     setPossPage(1);
   }, [preview]);
 
-  function send(action: (fd: FormData) => void, extra?: { sheets: string[]; allow: string[] }) {
+  function send(action: (fd: FormData) => void, extra?: { sheets: string[]; decisions: Map<string, Decision> }) {
     if (!file) return;
     const fd = new FormData();
     fd.append("file", file);
     extra?.sheets.forEach((s) => fd.append("sheets", s));
-    extra?.allow.forEach((k) => fd.append("allow", k));
+    extra?.decisions.forEach((d, k) => { if (d === "new") fd.append("allow", k); if (d === "update") fd.append("override", k); });
     startTransition(() => action(fd));
   }
 
   const sheets = preview?.sheets ?? [];
   const flagged = preview?.flagged ?? [];
   const possible = useMemo(() => flagged.filter((f) => f.kind === "possible" && picked.has(f.sheet)), [flagged, picked]);
-  const allowedHere = possible.filter((f) => allow.has(f.key)).length;
-  const total = sheets.filter((s) => picked.has(s.name)).reduce((n, s) => n + s.fresh, 0) + allowedHere;
+  const updates = useMemo(() => flagged.filter((f) => f.kind === "update" && picked.has(f.sheet)), [flagged, picked]);
+  const decided = (d: Decision) => possible.filter((f) => decisions.get(f.key) === d).length;
+  const chosenSheets = sheets.filter((s) => picked.has(s.name));
+  const newCount = chosenSheets.reduce((n, s) => n + s.fresh, 0) + decided("new");
+  const updateCount = chosenSheets.reduce((n, s) => n + s.updates, 0) + decided("update");
+  const setAll = (d: Decision, ok: (f: FlaggedRow) => boolean) =>
+    setDecisions(new Map(possible.map((f) => [f.key, ok(f) ? d : "skip"] as [string, Decision])));
   const busy = checking || importing;
 
   return (
@@ -108,6 +122,7 @@ export function ImportForm() {
                 <TableHead className={TH}>Template</TableHead>
                 <TableHead className={cn(TH, "text-right")}>Rows</TableHead>
                 <TableHead className={cn(TH, "text-right")}>New</TableHead>
+                <TableHead className={cn(TH, "text-right")}>Updates</TableHead>
                 <TableHead className={cn(TH, "text-right")}>Duplicates</TableHead>
                 <TableHead className={cn(TH, "text-right")}>Possible</TableHead>
                 <TableHead className={cn(TH, "pr-4 text-right")}>Email check</TableHead>
@@ -121,7 +136,7 @@ export function ImportForm() {
                     <TableCell className="pl-4">
                       <Checkbox
                         aria-label={`Import ${s.name}`}
-                        disabled={!ok || s.fresh + s.possible === 0}
+                        disabled={!ok || s.fresh + s.updates + s.possible === 0}
                         checked={picked.has(s.name)}
                         onCheckedChange={(on) => setPicked((p) => { const n = new Set(p); on ? n.add(s.name) : n.delete(s.name); return n; })}
                       />
@@ -136,6 +151,7 @@ export function ImportForm() {
                     </TableCell>
                     <TableCell className="text-right tabular-nums">{s.rows}</TableCell>
                     <TableCell className="text-right font-medium tabular-nums">{s.fresh}</TableCell>
+                    <TableCell className={cn("text-right tabular-nums", s.updates ? "font-medium text-blue-700" : "text-muted-foreground")}>{s.updates}</TableCell>
                     <TableCell className="text-right tabular-nums text-muted-foreground">{s.duplicates}</TableCell>
                     <TableCell className={cn("text-right tabular-nums", s.possible ? "font-medium text-amber-700" : "text-muted-foreground")}>{s.possible}</TableCell>
                     <TableCell className="pr-4 text-right whitespace-normal">
@@ -149,10 +165,34 @@ export function ImportForm() {
             </TableBody>
           </DataTable>
           <ul className="grid gap-1 text-xs text-muted-foreground">
-            <li><span className="font-medium text-foreground">Duplicates</span> have the same email, contact ID or LinkedIn profile as a lead already in the CRM or earlier in the file. They are always skipped.</li>
-            <li><span className="font-medium text-foreground">Possible duplicates</span> share a name and company, or a personal phone number, but not the email. You decide below.</li>
+            <li>
+              <span className="font-medium text-foreground">Updates</span> match a lead already in the CRM on at least 3 of: email, mobile phone, other phone, first + last name
+              (a phone blank on both counts). The new row replaces that lead&rsquo;s uploaded details; blank cells keep the old value. Owner, status, sequence, calls and comments stay.
+            </li>
+            <li><span className="font-medium text-foreground">Duplicates</span> have the same email, contact ID or LinkedIn profile as a lead already in the CRM or earlier in the file, without 3 of the 4 matching. They are skipped.</li>
+            <li><span className="font-medium text-foreground">Possible duplicates</span> match on 2 of the 4, or share a name and company or a personal phone number. You decide below.</li>
             <li><span className="font-medium text-foreground">Invalid emails</span> are imported with lead status Bad so nobody emails them. Unverified ones are imported with an &ldquo;Unverified&rdquo; tag.</li>
           </ul>
+        </section>
+      )}
+
+      {updates.length > 0 && (
+        <section className="grid gap-2">
+          <div>
+            <h3 className="text-sm font-semibold">2. Leads that will be updated ({updates.length})</h3>
+            <p className="text-xs text-muted-foreground">Each row matches an existing lead on 3 or 4 of the fields. Its filled cells replace that lead&rsquo;s details.</p>
+          </div>
+          <details className="rounded-xl border bg-card">
+            <summary className="cursor-pointer px-4 py-2.5 text-sm font-medium">Show the {updates.length} {updates.length === 1 ? "row" : "rows"} and what matched</summary>
+            <ul className="grid max-h-80 gap-2 overflow-y-auto border-t px-4 py-3 text-[13px]">
+              {updates.slice(0, 1000).map((f) => (
+                <li key={f.key} className="grid gap-0.5">
+                  <span><span className="font-medium">{f.name}</span> <span className="text-muted-foreground">· {f.sheet}, row {f.row} → updates {f.matches}</span></span>
+                  <span className="text-xs text-muted-foreground">{f.reason}</span>
+                </li>
+              ))}
+            </ul>
+          </details>
         </section>
       )}
 
@@ -160,12 +200,13 @@ export function ImportForm() {
         <section className="grid gap-3">
           <div className="flex flex-wrap items-end justify-between gap-2">
             <div>
-              <h3 className="text-sm font-semibold">2. Review possible duplicates ({possible.length})</h3>
-              <p className="text-xs text-muted-foreground">Skipped unless you tick &ldquo;Import anyway&rdquo;. Tick only when they are a different person.</p>
+              <h3 className="text-sm font-semibold">{updates.length > 0 ? 3 : 2}. Review possible duplicates ({possible.length})</h3>
+              <p className="text-xs text-muted-foreground">Skipped unless you choose otherwise. &ldquo;Update existing&rdquo; applies the row to the lead it matched; &ldquo;Import as new&rdquo; is for a different person.</p>
             </div>
-            <div className="flex gap-2">
-              <Button type="button" variant="ghost" size="sm" onClick={() => setAllow(new Set(possible.map((f) => f.key)))}>Import all anyway</Button>
-              <Button type="button" variant="ghost" size="sm" onClick={() => setAllow(new Set())}>Skip all</Button>
+            <div className="flex flex-wrap gap-1">
+              {possible.some((f) => f.canUpdate) && <Button type="button" variant="ghost" size="sm" onClick={() => setAll("update", (f) => f.canUpdate)}>Update all that match</Button>}
+              {possible.some((f) => f.canImportNew) && <Button type="button" variant="ghost" size="sm" onClick={() => setAll("new", (f) => f.canImportNew)}>Import all as new</Button>}
+              <Button type="button" variant="ghost" size="sm" onClick={() => setDecisions(new Map())}>Skip all</Button>
             </div>
           </div>
           <DataTable>
@@ -174,7 +215,7 @@ export function ImportForm() {
                 <TableHead className={cn(TH, "pl-4")}>Row in the file</TableHead>
                 <TableHead className={TH}>Why</TableHead>
                 <TableHead className={TH}>Looks like</TableHead>
-                <TableHead className={cn(TH, "pr-4 text-right")}>Import anyway</TableHead>
+                <TableHead className={cn(TH, "pr-4 text-right")}>Do</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -184,14 +225,20 @@ export function ImportForm() {
                     <div className="font-medium">{f.name}</div>
                     <div className="text-xs text-muted-foreground">{[f.company, f.email].filter(Boolean).join(" · ")} · {f.sheet}, row {f.row}</div>
                   </TableCell>
-                  <TableCell><Pill dot="bg-amber-500" className="bg-amber-50 text-amber-800">{f.reason}</Pill></TableCell>
+                  <TableCell className="max-w-64 whitespace-normal"><Pill dot="bg-amber-500" className="bg-amber-50 text-amber-800">{f.reason}</Pill></TableCell>
                   <TableCell className="max-w-sm whitespace-normal text-muted-foreground">{f.matches}</TableCell>
                   <TableCell className="pr-4 text-right">
-                    <Checkbox
-                      aria-label={`Import ${f.name} anyway`}
-                      checked={allow.has(f.key)}
-                      onCheckedChange={(on) => setAllow((a) => { const n = new Set(a); on ? n.add(f.key) : n.delete(f.key); return n; })}
-                    />
+                    <NativeSelect
+                      size="sm"
+                      aria-label={`What to do with ${f.name}`}
+                      value={decisions.get(f.key) ?? "skip"}
+                      onChange={(e) => setDecisions((m) => new Map(m).set(f.key, e.target.value as Decision))}
+                      className="ml-auto [&_select]:text-[13px]"
+                    >
+                      <NativeSelectOption value="skip">Skip</NativeSelectOption>
+                      {f.canUpdate && <NativeSelectOption value="update">Update existing</NativeSelectOption>}
+                      {f.canImportNew && <NativeSelectOption value="new">Import as new</NativeSelectOption>}
+                    </NativeSelect>
                   </TableCell>
                 </TableRow>
               ))}
@@ -212,14 +259,25 @@ export function ImportForm() {
 
       {sheets.length > 0 && (
         <div className="flex flex-wrap items-center gap-3">
-          <Button type="button" onClick={() => send(run, { sheets: [...picked], allow: [...allow] })} disabled={busy || total === 0 || !file}>
-            <Upload /> {importing ? "Importing…" : `Import ${total} ${total === 1 ? "lead" : "leads"}`}
+          <Button type="button" onClick={() => send(run, { sheets: [...picked], decisions })} disabled={busy || newCount + updateCount === 0 || !file}>
+            <Upload /> {importing ? "Importing…" : [
+              newCount || !updateCount ? `Import ${newCount} new ${newCount === 1 ? "lead" : "leads"}` : "",
+              updateCount ? `${newCount ? "update" : "Update"} ${updateCount} existing` : "",
+            ].filter(Boolean).join(", ")}
           </Button>
           <span className="text-xs text-muted-foreground">New leads arrive unassigned in the Lead List. The check runs again while saving, so nothing slips in twice.</span>
         </div>
       )}
 
       <Status state={result ? { ok: result.ok, error: result.error } : null} />
+      {result?.updated && result.updated.length > 0 && (
+        <details className="text-sm text-muted-foreground">
+          <summary className="cursor-pointer">{result.updated.length} updated leads and what changed</summary>
+          <ul className="mt-2 max-h-64 list-disc overflow-auto pl-5">
+            {result.updated.map((s) => <li key={s}>{s}</li>)}
+          </ul>
+        </details>
+      )}
       {result?.skipped && result.skipped.length > 0 && (
         <details className="text-sm text-muted-foreground">
           <summary className="cursor-pointer">{result.skipped.length} skipped rows</summary>

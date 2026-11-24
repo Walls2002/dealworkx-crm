@@ -23,6 +23,7 @@ import { LocalTime } from "./local-time";
 import { Avatar } from "./avatar";
 import { CapacityNote } from "./capacity-note";
 import { DueBadge, EmailCheckBadge, StatusBadge } from "./badges";
+import { RemoveLeads } from "./remove-leads";
 
 type Props = {
   rows: LeadRow[];
@@ -39,10 +40,12 @@ type Props = {
   openId: number | null;
   hideOwner: boolean;
   variant?: "queue" | "list";
+  /** The Removed leads list: rows offer Restore instead of Remove, and show when they were removed. */
+  removed?: boolean;
   empty: React.ReactNode;
 };
 
-type ColId = "lead" | "company" | "next" | "due" | "time" | "owner" | "status" | "country" | "zone" | "industry" | "actions";
+type ColId = "lead" | "company" | "next" | "due" | "time" | "owner" | "status" | "country" | "zone" | "industry" | "removed" | "actions";
 type Col = { id: ColId; key: Sort | null; label: string; className?: string };
 
 // Console: what is owed and when. Lead List: the old sheet columns.
@@ -62,14 +65,19 @@ const LIST: Col[] = [
   { id: "status", key: "status", label: "Lead status" },
   { id: "company", key: "company", label: "Company", className: "hidden md:table-cell" },
   { id: "industry", key: null, label: "Industry", className: "hidden lg:table-cell" },
-  { id: "next", key: null, label: "Current step", className: "hidden lg:table-cell" },
+  // Every Lead List lead is unassigned, so this reads "Not started" almost always: only on very wide screens.
+  { id: "next", key: null, label: "Current step", className: "hidden 2xl:table-cell" },
   { id: "country", key: null, label: "Country", className: "hidden md:table-cell" },
   { id: "zone", key: null, label: "Timezone", className: "hidden xl:table-cell" },
   { id: "actions", key: null, label: "Action", className: "w-28 pr-4 text-right" },
 ];
 
-export function LeadTable({ rows, today, admin, users, painPoints, capacity, params, path = "/", sort, dir, openId, hideOwner, variant = "queue", empty }: Props) {
-  const base = variant === "list" ? LIST : QUEUE;
+export function LeadTable({ rows, today, admin, users, painPoints, capacity, params, path = "/", sort, dir, openId, hideOwner, variant = "queue", removed = false, empty }: Props) {
+  const base = (variant === "list" ? LIST : QUEUE)
+    // The Removed list shows when a lead was removed in place of its (stopped) next step.
+    .map((c): Col => (removed && c.id === "next" ? { id: "removed", key: null, label: "Removed", className: "hidden lg:table-cell" } : c))
+    // Room for the remove / restore icon next to call, email and "…".
+    .map((c): Col => (admin && c.id === "actions" ? { ...c, className: "w-32 pr-4 text-right" } : c));
   const columns = hideOwner ? base.filter((c) => c.id !== "owner") : base;
   const router = useRouter();
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -122,6 +130,8 @@ export function LeadTable({ rows, today, admin, users, painPoints, capacity, par
               data-state={selected.has(r.id) || openId === r.id ? "selected" : undefined}
               className="h-12 cursor-pointer"
               onClick={(e) => {
+                // Clicks from menus opened by the row (rendered in a portal) still bubble here through React: ignore them.
+                if (!e.currentTarget.contains(e.target as Node)) return;
                 if ((e.target as HTMLElement).closest("a, button, input, label, [role=checkbox]")) return;
                 open(r.id);
               }}
@@ -131,19 +141,19 @@ export function LeadTable({ rows, today, admin, users, painPoints, capacity, par
                   <Checkbox aria-label={`Select ${r.name}`} checked={selected.has(r.id)} onCheckedChange={() => toggle(r.id)} />
                 </TableCell>
               )}
-              {columns.map((c, i) => <Cell key={c.id} col={c} r={r} today={today} href={withParams(params, { lead: String(r.id) }, path)} first={!admin && i === 0} />)}
+              {columns.map((c, i) => <Cell key={c.id} col={c} r={r} today={today} href={withParams(params, { lead: String(r.id) }, path)} first={!admin && i === 0} admin={admin} removed={removed} />)}
             </TableRow>
           ))}
         </TableBody>
       </DataTable>
       {admin && selected.size > 0 && (
-        <BulkBar ids={[...selected]} users={users} painPoints={painPoints} capacity={capacity} onDone={(m) => { setSelected(new Set()); toast(m); }} onClear={() => setSelected(new Set())} />
+        <BulkBar ids={[...selected]} users={users} painPoints={painPoints} capacity={capacity} removed={removed} onDone={(m) => { setSelected(new Set()); toast(m); }} onClear={() => setSelected(new Set())} />
       )}
     </>
   );
 }
 
-function Cell({ col, r, today, href, first }: { col: Col; r: LeadRow; today: string; href: string; first: boolean }) {
+function Cell({ col, r, today, href, first, admin, removed }: { col: Col; r: LeadRow; today: string; href: string; first: boolean; admin: boolean; removed: boolean }) {
   const cls = cn(col.className, first && "pl-4");
   switch (col.id) {
     case "lead":
@@ -174,16 +184,22 @@ function Cell({ col, r, today, href, first }: { col: Col; r: LeadRow; today: str
       return <TableCell className={cls}><StatusBadge status={r.status} /></TableCell>;
     case "industry":
       return (
-        <TableCell className={cn(cls, "max-w-48 truncate")} title={r.industry ? industryLabel(r.industry) : undefined}>
-          {r.industry ? industryLabel(r.industry) : <span className="text-muted-foreground">—</span>}
+        <TableCell className={cls} title={r.industry ? industryLabel(r.industry) : undefined}>
+          {/* max-width works on a block inside the cell, not on the cell itself. */}
+          {r.industry ? <span className="block max-w-32 truncate">{industryLabel(r.industry)}</span> : <span className="text-muted-foreground">—</span>}
         </TableCell>
       );
     case "country":
       return <TableCell className={cls}>{r.country || <span className="text-muted-foreground">—</span>}</TableCell>;
+    case "removed":
+      return <TableCell className={cn(cls, "text-muted-foreground")}>{r.removedAt ?? "—"}</TableCell>;
     case "actions":
       return (
         <TableCell className={cls}>
-          <RowActions name={r.name} detailsHref={href} leadId={r.id} phone={r.phone} email={r.email} linkedin={r.linkedin} />
+          <div className="flex items-center justify-end gap-1">
+            <RowActions name={r.name} detailsHref={href} leadId={r.id} phone={r.phone} email={r.email} linkedin={r.linkedin} />
+            {admin && <RemoveLeads ids={[r.id]} mode={removed ? "restore" : "remove"} look="icon" what={r.name} />}
+          </div>
         </TableCell>
       );
     case "zone":
@@ -211,7 +227,7 @@ function NextAction({ r }: { r: LeadRow }) {
   return <span className="text-muted-foreground">{r.ownerId ? (r.status === "Active" ? "Sequence complete" : r.status) : "Not started"}</span>;
 }
 
-function BulkBar({ ids, users, painPoints, capacity, onDone, onClear }: { ids: number[]; users: { id: number; name: string }[]; painPoints: string[]; capacity: Capacity | null; onDone: (message: string) => void; onClear: () => void }) {
+function BulkBar({ ids, users, painPoints, capacity, removed, onDone, onClear }: { ids: number[]; users: { id: number; name: string }[]; painPoints: string[]; capacity: Capacity | null; removed: boolean; onDone: (message: string) => void; onClear: () => void }) {
   const [ownerId, setOwnerId] = useState("");
   const [assignState, assign, assigning] = useActionState<FormState, FormData>(assignLeads, null);
   const [statusState, setStatus, setting] = useActionState<FormState, FormData>(bulkSetStatus, null);
@@ -222,6 +238,11 @@ function BulkBar({ ids, users, painPoints, capacity, onDone, onClear }: { ids: n
   return (
     <div role="region" aria-label="Bulk actions" className="fixed inset-x-3 bottom-4 z-30 mx-auto flex max-w-fit flex-wrap items-center gap-2 rounded-xl border bg-background p-2 pl-4 shadow-lg animate-in fade-in-0 slide-in-from-bottom-2">
       <span className="text-sm font-medium tabular-nums">{ids.length} selected</span>
+      {removed ? (
+        // Removed leads can only be put back; assigning or re-statusing them happens once they're in the list again.
+        <RemoveLeads ids={ids} mode="restore" what={`${ids.length} ${ids.length === 1 ? "lead" : "leads"}`} onDone={onClear} />
+      ) : (
+      <>
       <form action={assign} className="flex flex-wrap items-center gap-2">
         {ids.map((id) => <input key={id} type="hidden" name="ids" value={id} />)}
         <NativeSelect name="ownerId" required aria-label="Assign to" value={ownerId} onChange={(e) => setOwnerId(e.target.value)}>
@@ -243,6 +264,10 @@ function BulkBar({ ids, users, painPoints, capacity, onDone, onClear }: { ids: n
         </NativeSelect>
         <Button variant="outline" disabled={setting}>Apply</Button>
       </form>
+      <span className="mx-1 hidden h-6 w-px bg-border sm:block" aria-hidden />
+      <RemoveLeads ids={ids} mode="remove" what={`${ids.length} ${ids.length === 1 ? "lead" : "leads"}`} onDone={onClear} className="h-8" />
+      </>
+      )}
       <Button variant="ghost" size="icon" onClick={onClear} aria-label="Clear selection"><X /></Button>
       {capacity && ownerId && (
         <CapacityNote className="basis-full" capacity={capacity} ownerId={Number(ownerId)} ownerName={users.find((u) => String(u.id) === ownerId)?.name} adding={ids.length} />

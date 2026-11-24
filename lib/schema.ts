@@ -198,7 +198,98 @@ create table if not exists settings (
   key   text primary key,
   value text not null default ''
 );
+
+-- Audit log (admin "Activity log"): one row per thing someone did, with the full content (messages, notes,
+-- before and after values) in detail. Names are copied in, so a row still reads right after a lead is merged away
+-- or an invite is cancelled. Passwords and link tokens are never written here.
+create table if not exists audit_log (
+  id         bigserial primary key,
+  created_at timestamptz not null default now(),
+  user_id    int references users(id) on delete set null,
+  user_name  text not null default '',
+  category   text not null,
+  action     text not null,
+  summary    text not null,
+  lead_id    int,
+  lead_name  text not null default '',
+  detail     jsonb not null default '{}'::jsonb
+);
+create index if not exists audit_log_created_idx on audit_log(created_at desc, id desc);
+create index if not exists audit_log_user_idx on audit_log(user_id, created_at desc);
+create index if not exists audit_log_category_idx on audit_log(category, created_at desc);
+
+-- Once: seed the log from the lead activity history kept before it existed. Calls, comments, emails and steps
+-- one row each; bulk assigns, status changes and uploads (one activity per lead) collapse into one row per action.
+insert into audit_log (created_at, user_id, user_name, category, action, summary, lead_id, lead_name, detail)
+select a.created_at, a.user_id, coalesce(u.name, 'System'),
+       case a.kind when 'email' then 'Email' else 'Lead work' end,
+       case a.kind when 'call' then 'call.logged' when 'note' then 'comment.added' when 'email' then 'email.sent' else 'step.marked' end,
+       case a.kind when 'call' then 'Logged a call: ' || a.outcome
+                   when 'note' then 'Added a comment'
+                   when 'email' then 'Sent an email' || case when a.outcome <> '' then ' (' || a.outcome || ')' else '' end
+                   else a.body end,
+       a.lead_id, coalesce(trim(l.first_name || ' ' || l.last_name), ''),
+       jsonb_strip_nulls(jsonb_build_object(
+         'outcome', case when a.kind = 'call' then nullif(a.outcome, '') end,
+         'step', case when a.kind = 'email' then nullif(a.outcome, '') end,
+         'phone', nullif(a.phone, ''), 'subject', nullif(a.subject, ''),
+         'message', case when a.kind in ('call', 'note', 'email') then nullif(a.body, '') end,
+         'callback', a.callback_on, 'source', 'Recorded before the activity log existed'))
+  from activities a left join users u on u.id = a.user_id left join leads l on l.id = a.lead_id
+ where a.kind in ('call', 'note', 'email', 'step')
+   and not exists (select 1 from settings where key = 'audit_backfilled');
+insert into audit_log (created_at, user_id, user_name, category, action, summary, lead_id, lead_name, detail)
+select min(a.created_at), a.user_id, coalesce(min(u.name), 'System'),
+       case a.kind when 'assign' then 'Assignment' when 'import' then 'Import' else 'Lead work' end,
+       case a.kind when 'assign' then 'lead.assigned' when 'import' then 'lead.imported' else 'lead.updated' end,
+       case when count(*) = 1 then a.body else a.body || ' (' || count(*) || ' leads)' end,
+       case when count(*) = 1 then min(a.lead_id) end,
+       case when count(*) = 1 then coalesce(min(trim(l.first_name || ' ' || l.last_name)), '') else '' end,
+       jsonb_build_object('leads', count(*), 'source', 'Recorded before the activity log existed')
+  from activities a left join users u on u.id = a.user_id left join leads l on l.id = a.lead_id
+ where a.kind in ('assign', 'status', 'import')
+   and not exists (select 1 from settings where key = 'audit_backfilled')
+ group by a.user_id, a.kind, a.body, date_trunc('minute', a.created_at);
+insert into settings (key, value) values ('audit_backfilled', '1') on conflict (key) do nothing;
+
+-- Removed from the list: the lead stays (history kept) but leaves every list, count and the sequence until restored.
+alter table leads add column if not exists removed_at timestamptz;
+alter table leads add column if not exists removed_by int references users(id) on delete set null;
+create index if not exists leads_removed_idx on leads(removed_at desc) where removed_at is not null;
+
+-- Upload batches: one row per upload, so the Lead List can show the leads of one upload ("25 Nov 2026, 14:32").
+create table if not exists import_batches (
+  id         serial primary key,
+  created_at timestamptz not null default now(),
+  user_id    int references users(id) on delete set null,
+  file_name  text not null default '',
+  lead_count int not null default 0
+);
+alter table leads add column if not exists batch_id int references import_batches(id) on delete set null;
+create index if not exists leads_batch_idx on leads(batch_id, owner_id);
+-- Once: rebuild the batches of uploads made before this existed. Every lead of one upload got an "Uploaded from <file>"
+-- activity in the same transaction, so they share its timestamp, uploader and file.
+do $$ begin
+  if not exists (select 1 from settings where key = 'batches_backfilled') then
+    insert into import_batches (created_at, user_id, file_name, lead_count)
+    select a.created_at, a.user_id, regexp_replace(a.body, '^(Uploaded|Imported) from ', ''), count(*)
+      from activities a
+     where a.kind = 'import' and (a.body like 'Uploaded from %' or a.body like 'Imported from %')
+     group by a.created_at, a.user_id, a.body;
+    update leads l set batch_id = b.id
+      from activities a join import_batches b
+        on b.created_at = a.created_at and b.user_id is not distinct from a.user_id
+       and b.file_name = regexp_replace(a.body, '^(Uploaded|Imported) from ', '')
+     where a.lead_id = l.id and a.kind = 'import' and (a.body like 'Uploaded from %' or a.body like 'Imported from %')
+       and l.batch_id is null;
+    insert into settings (key, value) values ('batches_backfilled', '1') on conflict (key) do nothing;
+  end if;
+end $$;
 `;
+
+/** Activity log categories, in the order the filter lists them. */
+export const AUDIT_CATEGORIES = ["Sign-in", "Lead work", "Email", "Assignment", "Import", "Duplicates", "Team", "Settings", "Account"] as const;
+export type AuditCategory = (typeof AUDIT_CATEGORIES)[number];
 
 export const LEAD_STATUSES = ["Inactive", "Active", "Paused", "Bad"] as const;
 export const DISPOSITIONS = ["None", "Bounced", "Requested to unsubscribe", "Replied", "Meeting booked"] as const;

@@ -45,11 +45,11 @@ export function SearchBox({ q, placeholder }: { q: string; placeholder: string }
 export type FilterOption = { value: string; label: string };
 
 /** A filter dropdown that reads like the reference's outline buttons. */
-export function FilterSelect({ name, label, value, any, options, clears = [] }: { name: string; label: string; value: string; any: string; options: FilterOption[]; /** Other params to drop when this one changes. */ clears?: string[] }) {
+export function FilterSelect({ name, label, value, any, options, clears = [], className }: { name: string; label: string; value: string; any: string; options: FilterOption[]; /** Other params to drop when this one changes. */ clears?: string[]; className?: string }) {
   const go = useUrlFilter();
   return (
     // Capped so one long option (an industry name) can't stretch the toolbar; the open list still shows it in full.
-    <NativeSelect size="sm" aria-label={label} value={value} onChange={(e) => go({ ...Object.fromEntries(clears.map((k) => [k, ""])), [name]: e.target.value })} className="h-8 max-w-52 [&_select]:h-8 [&_select]:w-full [&_select]:truncate [&_select]:text-[13px]">
+    <NativeSelect size="sm" aria-label={label} value={value} onChange={(e) => go({ ...Object.fromEntries(clears.map((k) => [k, ""])), [name]: e.target.value })} className={`h-8 max-w-52 [&_select]:h-8 [&_select]:w-full [&_select]:truncate [&_select]:text-[13px] ${className ?? ""}`}>
       <NativeSelectOption value="">{any}</NativeSelectOption>
       {options.map((o) => <NativeSelectOption key={o.value} value={o.value}>{o.label}</NativeSelectOption>)}
     </NativeSelect>

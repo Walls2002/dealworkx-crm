@@ -16,6 +16,7 @@ import { EmailCheckBadge, StatusBadge } from "./badges";
 import { LeadSheet } from "./lead-sheet";
 import { AssignForm, CopyButton, LeadSettingsForm, LogCallForm, NoteForm, StepButton } from "./lead-forms";
 import { CurrentStep } from "./outreach";
+import { RemoveLeads } from "./remove-leads";
 import { LeadEmailActions } from "./send-email";
 import { listCallOutcomes } from "@/lib/data";
 
@@ -77,6 +78,7 @@ export async function LeadPanel({ lead, nextHref, position, today, closeHref, ad
       <div className="sticky top-0 z-10 flex h-14 shrink-0 items-center justify-between gap-2 border-b bg-background/95 px-4 pl-6 backdrop-blur">
         <span className="truncate text-sm text-muted-foreground tabular-nums">{position ?? "Lead"}</span>
         <div className="flex items-center gap-1">
+          {admin && !lead.removed && <RemoveLeads ids={[lead.id]} mode="remove" what={lead.name} className="mr-1" />}
           {nextHref ? (
             <Button variant="outline" size="sm" asChild>
               <Link href={nextHref} scroll={false}>Next lead <ArrowRight /></Link>
@@ -89,6 +91,13 @@ export async function LeadPanel({ lead, nextHref, position, today, closeHref, ad
           </Button>
         </div>
       </div>
+
+      {lead.removed && (
+        <div role="status" className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-amber-200 bg-amber-50 px-6 py-2.5 text-sm text-amber-900">
+          <span>Removed from the list {dateTime(lead.removed.at)}{lead.removed.by ? ` by ${lead.removed.by}` : ""}. Its sequence is stopped.</span>
+          {admin && <RemoveLeads ids={[lead.id]} mode="restore" what={lead.name} className="bg-background" />}
+        </div>
+      )}
 
       <div className="flex flex-col lg:grid lg:min-h-0 lg:flex-1 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
         {/* Doing */}

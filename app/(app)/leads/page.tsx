@@ -1,7 +1,8 @@
 import Link from "next/link";
-import { CopyCheck, Gauge, Inbox, Upload, Users } from "lucide-react";
+import { CopyCheck, Gauge, Inbox, ListX, Upload, Users } from "lucide-react";
 import { requireUser } from "@/lib/auth";
-import { capacity, filterOptions, getLead, zoneOptions, cityOptions, duplicateCount, listLeads, listPainPoints, listUsers, PAGE_SIZE, pageSizeOf, SORTS, viewCounts, type Sort } from "@/lib/data";
+import { APP_TIMEZONE } from "@/lib/dates";
+import { capacity, filterOptions, getLead, zoneOptions, cityOptions, duplicateCount, listBatches, listLeads, listPainPoints, listUsers, PAGE_SIZE, pageSizeOf, SORTS, viewCounts, type Sort } from "@/lib/data";
 import { LEAD_STATUSES } from "@/lib/schema";
 import { first, withParams, type Params } from "@/lib/url";
 import { clampPage } from "@/lib/paging";
@@ -14,6 +15,10 @@ import { Pager } from "@/components/pager";
 import { EmptyState, Page, Segments, StatCard, StatGrid, Toolbar } from "@/components/page";
 
 export const metadata = { title: "Lead List" };
+
+const batchTime = new Intl.DateTimeFormat("en-GB", { timeZone: APP_TIMEZONE, day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+/** A batch's name: when it was uploaded, in the team's timezone. "25 Nov 2026, 14:32" */
+const uploadedAt = (iso: string) => batchTime.format(new Date(iso));
 
 /** The old Lead List tab: unassigned leads, filtered by status, country and timezone, assigned in batches. */
 export default async function LeadListPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
@@ -29,13 +34,14 @@ export default async function LeadListPage({ searchParams }: { searchParams: Pro
   const zone = first(sp.zone).slice(0, 100);
   const city = first(sp.city).slice(0, 100);
   const industry = first(sp.industry).slice(0, 100);
+  const batch = first(sp.batch) === "none" ? "none" : String(Number(first(sp.batch)) || "");
   const leadId = Number(first(sp.lead)) || null;
   const admin = user.role === "admin";
 
-  const params: Params = { q, status, country, zone, city, industry, sort: sort === "name" ? undefined : sort, dir: dir === "asc" ? undefined : dir, page: page > 1 ? String(page) : undefined, size: size === PAGE_SIZE ? undefined : String(size) };
+  const params: Params = { q, status, country, zone, city, industry, batch, sort: sort === "name" ? undefined : sort, dir: dir === "asc" ? undefined : dir, page: page > 1 ? String(page) : undefined, size: size === PAGE_SIZE ? undefined : String(size) };
 
-  const [{ rows, total, today }, users, painPoints, lead, options, cap, counts, dupes] = await Promise.all([
-    listLeads(user, { view: "unassigned", q, owner: "", status, country, zone, city, industry, sort, dir, page, size }),
+  const [{ rows, total, today }, users, painPoints, lead, options, cap, counts, dupes, uploads] = await Promise.all([
+    listLeads(user, { view: "unassigned", q, owner: "", status, country, zone, city, industry, batch, sort, dir, page, size }),
     listUsers(),
     admin ? listPainPoints() : Promise.resolve([] as string[]),
     leadId ? getLead(user, leadId) : Promise.resolve(null),
@@ -43,13 +49,22 @@ export default async function LeadListPage({ searchParams }: { searchParams: Pro
     capacity(),
     viewCounts(user),
     admin ? duplicateCount() : Promise.resolve(0),
+    listBatches(user),
   ]);
   clampPage(page, total, size, params, "/leads", { lead: leadId ? String(leadId) : undefined });
   const people = users.map((u) => ({ id: u.id, name: u.name }));
   const ids = rows.map((r) => r.id);
   const at = lead ? ids.indexOf(lead.id) : -1;
   const nextId = lead ? (at >= 0 ? ids[at + 1] : ids.find((id) => id !== lead.id)) : undefined;
-  const filtered = Boolean(q || status || country || zone || city || industry);
+  const filtered = Boolean(q || status || country || zone || city || industry || batch);
+  // Upload batches still holding unassigned leads (plus the chosen one), named by when they were uploaded.
+  const batchOptions = [
+    ...uploads.batches
+      .filter((b) => b.unassigned > 0 || String(b.id) === batch)
+      .map((b) => ({ value: String(b.id), label: `${uploadedAt(b.createdAt)} · ${b.unassigned.toLocaleString("en-US")} ${b.unassigned === 1 ? "lead" : "leads"}` })),
+    ...(uploads.noBatch > 0 || batch === "none" ? [{ value: "none", label: `Not from an upload · ${uploads.noBatch.toLocaleString("en-US")}` }] : []),
+  ];
+  const chosenBatch = uploads.batches.find((b) => String(b.id) === batch) ?? null;
   const zones = zoneOptions(options.zones, country);
   // Hundreds of cities per country, so the city list is offered only once a country narrows it.
   const cities = country ? cityOptions(options.cities, country, zone) : [];
@@ -103,14 +118,30 @@ export default async function LeadListPage({ searchParams }: { searchParams: Pro
 
       <div className="grid gap-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <Segments
-            label="Lead status"
-            items={[{ label: "All", value: "" }, ...LEAD_STATUSES.map((s) => ({ label: s, value: s }))].map(({ label, value }) => ({
-              label, href: withParams({ q, country, zone, city, industry, size: params.size }, { status: value || undefined }, "/leads"), active: status === value,
-            }))}
-          />
+          <div className="flex flex-wrap items-center gap-2">
+            <Segments
+              label="Lead status"
+              items={[{ label: "All", value: "" }, ...LEAD_STATUSES.map((s) => ({ label: s, value: s }))].map(({ label, value }) => ({
+                label, href: withParams({ q, country, zone, city, industry, batch, size: params.size }, { status: value || undefined }, "/leads"), active: status === value,
+              }))}
+            />
+            {batchOptions.length > 0 && (
+              <FilterSelect name="batch" label="Upload batch" value={batch} any="All upload batches" options={batchOptions} className="max-w-72" />
+            )}
+          </div>
           {!admin && <CapacityNote capacity={cap} ownerId={user.id} ownerName="You" className="text-xs" />}
+          {admin && counts.removed > 0 && (
+            <Button variant="ghost" size="sm" className="h-8 text-muted-foreground" asChild>
+              <Link href="/removed"><ListX /> Removed leads <span className="tabular-nums">{counts.removed.toLocaleString("en-US")}</span></Link>
+            </Button>
+          )}
         </div>
+        {chosenBatch && (
+          <p className="text-xs text-muted-foreground">
+            Uploaded {uploadedAt(chosenBatch.createdAt)}{chosenBatch.uploadedBy && ` by ${chosenBatch.uploadedBy}`}{chosenBatch.fileName && ` from ${chosenBatch.fileName}`} ·{" "}
+            {chosenBatch.total.toLocaleString("en-US")} {chosenBatch.total === 1 ? "lead" : "leads"} uploaded, {chosenBatch.unassigned.toLocaleString("en-US")} still unassigned
+          </p>
+        )}
         <LeadTable
           rows={rows}
           today={today}

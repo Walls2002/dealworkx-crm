@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
-  ChevronRight, CopyCheck, Headset, History, KeyRound, LayoutDashboard, ListOrdered, LogOut, Mail, PenLine, PhoneCall, ShieldCheck,
+  ChevronRight, CopyCheck, Headset, History, KeyRound, LayoutDashboard, ListOrdered, LogOut, Mail, PenLine, ListX, PhoneCall, ScrollText, ShieldCheck,
   ThumbsUp, Upload, Users,
   type LucideIcon,
 } from "lucide-react";
@@ -113,6 +113,17 @@ export function AppSidebar({ user, counts }: { user: ShellUser; counts: NavCount
                 <SidebarMenuItem>
                   <SidebarMenuButton asChild isActive={isActive(path, "/team")} tooltip="Team" className="h-9 text-[13px] text-muted-foreground data-[active=true]:font-medium data-[active=true]:text-sidebar-accent-foreground">
                     <Link href="/team" onClick={close}><ShieldCheck /><span>Team</span></Link>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+                <SidebarMenuItem>
+                  <SidebarMenuButton asChild isActive={isActive(path, "/removed")} tooltip="Removed leads" className="h-9 text-[13px] text-muted-foreground data-[active=true]:font-medium data-[active=true]:text-sidebar-accent-foreground">
+                    <Link href="/removed" onClick={close}><ListX /><span>Removed leads</span></Link>
+                  </SidebarMenuButton>
+                  {counts.removed > 0 && <SidebarMenuBadge className="top-2 text-[11px] tabular-nums peer-data-[active=true]/menu-button:text-sidebar-accent-foreground">{counts.removed.toLocaleString("en-US")}</SidebarMenuBadge>}
+                </SidebarMenuItem>
+                <SidebarMenuItem>
+                  <SidebarMenuButton asChild isActive={isActive(path, "/logs")} tooltip="Activity log" className="h-9 text-[13px] text-muted-foreground data-[active=true]:font-medium data-[active=true]:text-sidebar-accent-foreground">
+                    <Link href="/logs" onClick={close}><ScrollText /><span>Activity log</span></Link>
                   </SidebarMenuButton>
                 </SidebarMenuItem>
               </SidebarMenu>

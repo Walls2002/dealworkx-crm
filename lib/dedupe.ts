@@ -1,10 +1,18 @@
 import type { Db } from "./db";
+import { splitPhone } from "./phone";
 
 /**
- * Duplicate rules for lead uploads.
- * Definite (skipped automatically): same email, same contact ID, or same LinkedIn profile.
- * Possible (an admin decides): same name + company, or the same personal phone (work direct, mobile, home).
- * Company and corporate phones are shared by colleagues, so they never count.
+ * Duplicate rules for lead uploads, checked in this order.
+ *
+ * 1. Same person (PersonIndex): compare four fields with a lead already in the CRM: email, mobile phone, other phone,
+ *    and first + last name. A phone that is blank on both sides counts as matching. At least one real email or phone
+ *    match is required, so two people who merely share a name and have no phones never match.
+ *    - 3 or 4 match: "update". The upload replaces the old lead's sheet data (blank cells keep the old value).
+ *    - 2 match: "possible". Flagged; the admin chooses skip, update the existing lead, or import as new.
+ * 2. Otherwise the older rules:
+ *    Definite (skipped automatically): same email, same contact ID, or same LinkedIn profile.
+ *    Possible (an admin decides): same name + company, or the same personal phone (work direct, mobile, home).
+ *    Company and corporate phones are shared by colleagues, so they never count.
  */
 
 const clean = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -24,18 +32,91 @@ export function nameKey(first: string, last: string, company: string): string {
   return (f || l) && c ? `${f}|${l}@${c}` : "";
 }
 
-/** Last 10 digits, so "+1 (415) 555-0101" and "415.555.0101" match. */
+/** Last 10 digits of the main number (extension dropped), so "+1 (415) 555-0101" and "415.555.0101 ext 12" match. */
 export function phoneKey(phone: string): string {
-  const d = phone.replace(/\D/g, "");
+  const d = splitPhone(phone).main.replace(/\D/g, "");
   return d.length >= 7 ? d.slice(-10) : "";
+}
+
+/** First + last name, ignoring case, spaces and punctuation. */
+export function fullNameKey(first: string, last: string): string {
+  const f = clean(first), l = clean(last);
+  return f || l ? `${f}|${l}` : "";
 }
 
 export type Candidate = {
   email: string; contactId: string; linkedin: string;
   first: string; last: string; company: string; phones: string[];
+  mobile: string; other: string;
 };
 
-export type Match = { kind: "definite" | "possible"; reason: string; with: string };
+export type Match = {
+  kind: "definite" | "possible" | "update";
+  reason: string;
+  with: string;
+  /** The CRM lead an "update" (or a 2-of-4 "possible") would change. */
+  targetId?: number;
+  /** A 2-of-4 match can be imported as a new lead only when nothing unique (email, contact ID, LinkedIn) collides. */
+  canImportNew?: boolean;
+};
+
+/* ---------- 1. same person: 4-field comparison against the CRM ---------- */
+
+export type Existing = { id: number; email: string; mobile: string; other: string; name: string; label: string };
+export type PersonMatch = { lead: Existing; matched: string[]; total: number; real: number };
+
+export class PersonIndex {
+  private byEmail = new Map<string, Existing[]>();
+  private byMobile = new Map<string, Existing[]>();
+  private byOther = new Map<string, Existing[]>();
+  private byName = new Map<string, Existing[]>();
+
+  add(e: Existing) {
+    const put = (m: Map<string, Existing[]>, k: string) => { if (k) (m.get(k) ?? m.set(k, []).get(k)!).push(e); };
+    put(this.byEmail, e.email);
+    put(this.byMobile, e.mobile);
+    put(this.byOther, e.other);
+    put(this.byName, e.name);
+  }
+
+  /** The CRM lead that shares the most of the four fields with this row, or null when none shares a real value. */
+  best(c: Candidate): PersonMatch | null {
+    const em = emailKey(c.email), mo = phoneKey(c.mobile), ot = phoneKey(c.other), nm = fullNameKey(c.first, c.last);
+    const pool = new Set<Existing>([
+      ...(em ? this.byEmail.get(em) ?? [] : []), ...(mo ? this.byMobile.get(mo) ?? [] : []),
+      ...(ot ? this.byOther.get(ot) ?? [] : []), ...(nm ? this.byName.get(nm) ?? [] : []),
+    ]);
+    let top: PersonMatch | null = null;
+    for (const e of pool) {
+      const matched: string[] = [];
+      let real = 0, blank = 0, name = 0;
+      if (em && em === e.email) { real++; matched.push("email"); }
+      if (mo && mo === e.mobile) { real++; matched.push("mobile phone"); } else if (!mo && !e.mobile) { blank++; matched.push("mobile phone (blank on both)"); }
+      if (ot && ot === e.other) { real++; matched.push("other phone"); } else if (!ot && !e.other) { blank++; matched.push("other phone (blank on both)"); }
+      if (nm && nm === e.name) { name++; matched.push("first + last name"); }
+      // Shared name + blank phones alone is not the same person: a real email or phone match is required.
+      if (real === 0) continue;
+      const total = real + blank + name;
+      if (!top || total > top.total || (total === top.total && real > top.real)) top = { lead: e, matched, total, real };
+    }
+    return top;
+  }
+
+  static async fromDb(d: Db): Promise<PersonIndex> {
+    const index = new PersonIndex();
+    const rows = await d.query<Record<string, string>>("select id, first_name, last_name, email, phone_mobile, phone_other from leads");
+    for (const r of rows) {
+      const who = `${r.first_name} ${r.last_name}`.trim() || "(No name)";
+      index.add({
+        id: Number(r.id), email: emailKey(r.email), mobile: phoneKey(r.phone_mobile), other: phoneKey(r.phone_other),
+        name: fullNameKey(r.first_name, r.last_name), label: `${who}${r.email ? ` <${r.email}>` : ""} (already in the CRM)`,
+      });
+    }
+    return index;
+  }
+}
+
+/* ---------- 2. the older rules: CRM and earlier rows in the same file ---------- */
 
 type Seen = { label: string };
 
@@ -77,7 +158,10 @@ export class DuplicateIndex {
     for (const r of rows) {
       const who = `${r.first_name} ${r.last_name}`.trim() || "(No name)";
       index.add(
-        { email: r.email, contactId: r.contact_id, linkedin: r.linkedin_url, first: r.first_name, last: r.last_name, company: r.company, phones: [r.phone_work, r.phone_mobile, r.phone_home] },
+        {
+          email: r.email, contactId: r.contact_id, linkedin: r.linkedin_url, first: r.first_name, last: r.last_name, company: r.company,
+          phones: [r.phone_work, r.phone_mobile, r.phone_home], mobile: r.phone_mobile, other: "",
+        },
         `${who}${r.email ? ` <${r.email}>` : ""} (already in the CRM)`,
       );
     }

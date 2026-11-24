@@ -1,7 +1,7 @@
 import "server-only";
 import type { User } from "./auth";
 import { db } from "./db";
-import { addDays, iso, todayISO } from "./dates";
+import { addDays, dateTime, iso, todayISO } from "./dates";
 import { industryLabel } from "./format";
 import { merge } from "./sequence";
 import { CALL_OUTCOMES } from "./schema";
@@ -41,6 +41,8 @@ export type LeadRow = {
   nextLabel: string;
   nextChannel: string | null;
   nextDue: string | null;
+  /** When the lead was removed from the list, ready to show ("25 Nov, 14:32"). Removed leads list only. */
+  removedAt: string | null;
 };
 
 // A lead on the "Email only" plan skips the Step 1 LinkedIn message, as in the old Console.
@@ -55,10 +57,15 @@ const NEXT_ACTION_CTE = /* sql */ `
       from leads l left join users u on u.id = l.owner_id
   )`;
 
-function visibility(user: User, params: unknown[]): string {
-  if (user.role === "admin") return "true";
+/**
+ * Which leads a user sees: admins everything, reps their own plus the unassigned pool. Leads removed from the list
+ * are left out everywhere, except the Removed leads list (`removed` true), which shows only them.
+ */
+function visibility(user: User, params: unknown[], removed = false): string {
+  const gone = removed ? "removed_at is not null" : "removed_at is null";
+  if (user.role === "admin") return `(${gone})`;
   params.push(user.id);
-  return `(owner_id = $${params.length} or owner_id is null)`;
+  return `((owner_id = $${params.length} or owner_id is null) and ${gone})`;
 }
 
 function viewClause(view: View, user: User, params: unknown[], today: string): string {
@@ -86,6 +93,10 @@ function viewClause(view: View, user: User, params: unknown[], today: string): s
 
 export type LeadQuery = {
   view: View; q: string; owner: string; status: string; country?: string; zone?: string; city?: string; industry?: string;
+  /** An upload batch id, or "none" for leads that didn't come from an upload. */
+  batch?: string;
+  /** The Removed leads list: only leads removed from the list. */
+  removed?: boolean;
   sort: Sort; dir: "asc" | "desc"; page: number; size?: number;
 };
 
@@ -93,7 +104,7 @@ export async function listLeads(user: User, query: LeadQuery) {
   const d = await db();
   const today = todayISO();
   const params: unknown[] = [];
-  const where = [visibility(user, params), viewClause(query.view, user, params, today)];
+  const where = [visibility(user, params, query.removed), viewClause(query.view, user, params, today)];
   // Search: find the matching leads through the trigram index first, then sort just those.
   let matched = "";
   if (query.q) {
@@ -130,6 +141,11 @@ export async function listLeads(user: User, query: LeadQuery) {
     params.push(query.industry);
     where.push(`industry = $${params.length}`);
   }
+  if (query.batch === "none") where.push("batch_id is null");
+  else if (Number(query.batch)) {
+    params.push(Number(query.batch));
+    where.push(`batch_id = $${params.length}`);
+  }
   const dir = query.dir === "desc" ? "desc" : "asc";
   const order = {
     due: `next_due ${dir} nulls last, last_name`,
@@ -138,13 +154,15 @@ export async function listLeads(user: User, query: LeadQuery) {
     owner: `owner_name ${dir} nulls ${dir === "asc" ? "first" : "last"}, last_name`,
     status: `status ${dir}, next_due nulls last`,
   }[query.sort];
+  // The Removed leads list reads newest removal first unless a column is chosen.
+  const orderBy = query.removed && query.sort === "name" && dir === "asc" ? "removed_at desc, last_name" : order;
 
   const size = query.size ?? PAGE_SIZE;
   const filter = where.join(" and ");
   // The page and the total run side by side; the page reads only its own rows through the indexes.
   const [rows, [count]] = await Promise.all([
     d.query<Record<string, unknown>>(
-      `with ${matched ? `${matched}, ` : ""}${NEXT_ACTION_CTE} select * from enriched where ${filter} order by ${order}
+      `with ${matched ? `${matched}, ` : ""}${NEXT_ACTION_CTE} select * from enriched where ${filter} order by ${orderBy}
         limit ${size} offset ${(Math.max(1, query.page) - 1) * size}`,
       params,
     ),
@@ -176,16 +194,19 @@ function toLeadRow(r: Record<string, unknown>): LeadRow {
     nextLabel: callbackFirst ? "Callback" : stepDue ? `Step ${r.step_number} · ${r.channel}` : "",
     nextChannel: callbackFirst ? "Phone" : stepDue ? String(r.channel) : null,
     nextDue,
+    // Formatted here, on the server, in the team's timezone (the table is a client component).
+    removedAt: r.removed_at ? dateTime(r.removed_at) : null,
   };
 }
 
-export type NavCounts = Record<View, number> & { interested: number; emailRequested: number };
+export type NavCounts = Record<View, number> & { interested: number; emailRequested: number; removed: number };
 
-/** Counts for each sidebar entry, under the same visibility rules as the lists. */
+/** Counts for each sidebar entry, under the same visibility rules as the lists. Removed leads count only as removed. */
 export async function viewCounts(user: User): Promise<NavCounts> {
   const d = await db();
   const today = todayISO();
-  const vis = user.role === "admin" ? "true" : "(owner_id = $1 or owner_id is null)";
+  const vis = user.role === "admin" ? "removed_at is null" : "(owner_id = $1 or owner_id is null) and removed_at is null";
+  const removed = user.role === "admin" ? "(select count(*) from leads where removed_at is not null)::int" : "0";
   // One pass over leads: every count reads stored columns, including each lead's last call result.
   const [row] = await d.query<Record<string, number>>(
     `select count(*) filter (where owner_id = $1 and next_due <= $2)::int as today,
@@ -196,12 +217,13 @@ export async function viewCounts(user: User): Promise<NavCounts> {
             count(*) filter (where owner_id is null)::int as unassigned,
             count(*)::int as "all",
             count(*) filter (where last_call_outcome = 'Interested')::int as interested,
-            count(*) filter (where last_call_outcome = 'Email requested')::int as email_requested
+            count(*) filter (where last_call_outcome = 'Email requested')::int as email_requested,
+            ${removed} as removed
        from leads where ${vis}`,
     [user.id, today],
   );
   const { email_requested, ...rest } = row;
-  return { ...(rest as Record<View, number> & { interested: number }), emailRequested: email_requested };
+  return { ...(rest as Record<View, number> & { interested: number; removed: number }), emailRequested: email_requested };
 }
 
 /** Distinct countries, timezones and cities on leads the user can see, for the list filters. */
@@ -428,6 +450,100 @@ export async function capacity(): Promise<Capacity> {
   };
 }
 
+/* ---------- upload batches ---------- */
+
+export type UploadBatch = { id: number; createdAt: string; fileName: string; uploadedBy: string; total: number; unassigned: number };
+
+/**
+ * Upload batches, newest first, with how many of each batch's leads are still unassigned (what the Lead List shows),
+ * plus how many unassigned leads came from no upload at all (seeded or merged in). Same visibility as the lists.
+ */
+export async function listBatches(user: User): Promise<{ batches: UploadBatch[]; noBatch: number }> {
+  const d = await db();
+  const params: unknown[] = [];
+  const vis = visibility(user, params);
+  const [rows, [none]] = await Promise.all([
+    d.query<Record<string, unknown>>(
+      `select b.id, b.created_at, b.file_name, b.lead_count, u.name as uploaded_by,
+              (select count(*) from leads l where l.batch_id = b.id and l.owner_id is null and ${vis})::int as unassigned
+         from import_batches b left join users u on u.id = b.user_id
+        order by b.created_at desc, b.id desc`,
+      params,
+    ),
+    d.query<{ n: number }>(`select count(*)::int as n from leads where batch_id is null and owner_id is null and ${vis}`, params),
+  ]);
+  return {
+    batches: rows.map((r) => ({
+      id: Number(r.id), createdAt: new Date(String(r.created_at)).toISOString(), fileName: String(r.file_name),
+      uploadedBy: String(r.uploaded_by ?? ""), total: Number(r.lead_count), unassigned: Number(r.unassigned),
+    })),
+    noBatch: none.n,
+  };
+}
+
+/* ---------- activity log (admin) ---------- */
+
+export type AuditRow = {
+  id: number; createdAt: string; userId: number | null; userName: string; category: string; action: string;
+  summary: string; leadId: number | null; leadName: string; detail: Record<string, unknown>;
+};
+
+export type AuditQuery = {
+  /** First and last day (YYYY-MM-DD, team timezone), inclusive. */
+  from: string; to: string;
+  userId?: number | null; category?: string; q?: string;
+  page: number; size: number;
+};
+
+/** The activity log for a date range, newest first, with per-category counts for the same filters. */
+export async function listAuditLog(query: AuditQuery) {
+  const d = await db();
+  const tz = process.env.APP_TIMEZONE || "Asia/Singapore";
+  const params: unknown[] = [query.from, query.to, tz];
+  const where = ["a.created_at >= ($1::date::timestamp at time zone $3)", "a.created_at < (($2::date + 1)::timestamp at time zone $3)"];
+  if (query.userId) { params.push(query.userId); where.push(`a.user_id = $${params.length}`); }
+  if (query.q) {
+    params.push(`%${query.q.toLowerCase()}%`);
+    const p = `$${params.length}`;
+    where.push(`(lower(a.summary) like ${p} or lower(a.lead_name) like ${p} or lower(a.user_name) like ${p} or lower(a.detail::text) like ${p})`);
+  }
+  const base = where.join(" and ");
+  const catParams = [...params];
+  let filter = base;
+  if (query.category) { params.push(query.category); filter += ` and a.category = $${params.length}`; }
+  const size = Math.min(200, Math.max(10, query.size));
+  const offset = (Math.max(1, query.page) - 1) * size;
+
+  const [rows, [count], byCategory] = await Promise.all([
+    d.query<Record<string, unknown>>(
+      `select a.id, a.created_at, a.user_id, coalesce(u.name, nullif(a.user_name, ''), 'System') as user_name, a.category, a.action,
+              a.summary, a.lead_id, a.lead_name, a.detail
+         from audit_log a left join users u on u.id = a.user_id
+        where ${filter} order by a.created_at desc, a.id desc limit ${size} offset ${offset}`,
+      params,
+    ),
+    d.query<{ total: number; people: number }>(`select count(*)::int as total, count(distinct a.user_id)::int as people from audit_log a where ${filter}`, params),
+    d.query<{ category: string; n: number }>(`select a.category, count(*)::int as n from audit_log a where ${base} group by 1`, catParams),
+  ]);
+  return {
+    rows: rows.map((r): AuditRow => ({
+      id: Number(r.id), createdAt: new Date(String(r.created_at)).toISOString(), userId: r.user_id == null ? null : Number(r.user_id),
+      userName: String(r.user_name), category: String(r.category), action: String(r.action), summary: String(r.summary),
+      leadId: r.lead_id == null ? null : Number(r.lead_id), leadName: String(r.lead_name ?? ""),
+      detail: (typeof r.detail === "string" ? JSON.parse(r.detail) : r.detail ?? {}) as Record<string, unknown>,
+    })),
+    total: count.total,
+    people: count.people,
+    byCategory: Object.fromEntries(byCategory.map((c) => [c.category, c.n])) as Record<string, number>,
+  };
+}
+
+/** Everyone who has ever had an account, for the log's person filter (pending invites included). */
+export async function listAllPeople() {
+  const d = await db();
+  return d.query<{ id: number; name: string; role: string }>("select id, name, role from users order by lower(name)");
+}
+
 export async function listUsers() {
   const d = await db();
   // People still on an invite can't be given leads until they've set a password.
@@ -452,7 +568,7 @@ export async function listTeam(): Promise<TeamMember[]> {
   const rows = await d.query<Record<string, unknown>>(
     `select u.id, u.name, u.email, u.role, u.password_hash = '' as invited, u.invited_at,
             not exists (select 1 from auth_tokens t where t.user_id = u.id and t.purpose = 'invite' and t.used_at is null and t.expires_at > now()) as expired,
-            (select count(*) from leads l where l.owner_id = u.id)::int as leads
+            (select count(*) from leads l where l.owner_id = u.id and l.removed_at is null)::int as leads
        from users u
       order by (u.password_hash = ''), u.role, lower(u.name)`,
   );
@@ -494,7 +610,8 @@ export function canWrite(user: User, ownerId: number | null): boolean {
 export async function getLead(user: User, id: number) {
   const d = await db();
   const [lead] = await d.query<Record<string, unknown>>(
-    `select l.*, u.name as owner_name from leads l left join users u on u.id = l.owner_id where l.id = $1`,
+    `select l.*, u.name as owner_name, rb.name as removed_by_name
+       from leads l left join users u on u.id = l.owner_id left join users rb on rb.id = l.removed_by where l.id = $1`,
     [id],
   );
   if (!lead) return null;
@@ -565,6 +682,8 @@ export async function getLead(user: User, id: number) {
 
   return {
     id: Number(lead.id),
+    /** Set when the lead was removed from the list: when and by whom. */
+    removed: lead.removed_at ? { at: new Date(String(lead.removed_at)).toISOString(), by: (lead.removed_by_name as string) ?? null } : null,
     firstName: String(lead.first_name),
     lastName: String(lead.last_name),
     name: `${lead.first_name} ${lead.last_name}`.trim() || "(No name)",
@@ -641,8 +760,9 @@ export async function dashboard(user: User, query: DashboardQuery = {}) {
   const narrowed = Boolean(query.country || query.industry);
   // Same visibility as the lists: admins see everything, reps their own leads plus the unassigned pool.
   const scoped = admin ? (owner ? `l.owner_id = ${owner}` : "true") : `(l.owner_id = ${Number(user.id)} or l.owner_id is null)`;
-  const pool = admin ? "true" : `(l.owner_id = ${Number(user.id)} or l.owner_id is null)`;
-  const owned = admin ? (owner ? `l.owner_id = ${owner}` : "l.owner_id is not null") : `l.owner_id = ${Number(user.id)}`;
+  // Leads removed from the list are out of every lead count and the queue (their past calls and steps still count).
+  const pool = `l.removed_at is null and ${admin ? "true" : `(l.owner_id = ${Number(user.id)} or l.owner_id is null)`}`;
+  const owned = `l.removed_at is null and ${admin ? (owner ? `l.owner_id = ${owner}` : "l.owner_id is not null") : `l.owner_id = ${Number(user.id)}`}`;
   const activityScope = admin ? (owner ? `a.user_id = ${owner}` : "true") : `a.user_id = ${Number(user.id)}`;
   const queueSize = 10;
 
@@ -678,7 +798,7 @@ export async function dashboard(user: User, query: DashboardQuery = {}) {
          select x.owner_id, count(*) filter (where x.status = 'Active')::int as active,
                 count(*) filter (where x.next_due between $1 and $2)::int as due, count(*) filter (where x.next_due < $4)::int as overdue,
                 count(*) filter (where x.disposition = 'Meeting booked')::int as meetings
-           from leads x where x.owner_id is not null${f.reps} group by x.owner_id
+           from leads x where x.owner_id is not null and x.removed_at is null${f.reps} group by x.owner_id
        ), calls as (
          select a.user_id, count(*)::int as n from activities a ${narrowed ? "join leads x on x.id = a.lead_id" : ""}
           where a.kind = 'call' and a.created_at >= ${rangeStart} and a.created_at < ${rangeEnd}${f.reps} group by a.user_id
@@ -775,12 +895,12 @@ export async function listDuplicateGroups(limit = 20, offset = 0): Promise<{ gro
        select id, 'Same name and company' as reason,
               regexp_replace(lower(first_name), '[^a-z0-9]', '', 'g') || '|' || regexp_replace(lower(last_name), '[^a-z0-9]', '', 'g')
               || '@' || regexp_replace(lower(company), '[^a-z0-9]', '', 'g') as key
-         from leads where company <> '' and (first_name <> '' or last_name <> '')
-       union all select id, 'Same LinkedIn profile', linkedin_key from leads where linkedin_key <> ''
-       union all select id, 'Same contact ID', contact_id from leads where contact_id <> ''
+         from leads where company <> '' and (first_name <> '' or last_name <> '') and removed_at is null
+       union all select id, 'Same LinkedIn profile', linkedin_key from leads where linkedin_key <> '' and removed_at is null
+       union all select id, 'Same contact ID', contact_id from leads where contact_id <> '' and removed_at is null
        union all select l.id, 'Same phone number', right(regexp_replace(p, '[^0-9]', '', 'g'), 10)
          from leads l, unnest(array[l.phone_work, l.phone_mobile, l.phone_home]) as p
-        where length(regexp_replace(p, '[^0-9]', '', 'g')) >= 7
+        where length(regexp_replace(p, '[^0-9]', '', 'g')) >= 7 and l.removed_at is null
      )
      select reason, array_agg(distinct id order by id) as ids from k group by reason, key having count(distinct id) > 1`,
   );
