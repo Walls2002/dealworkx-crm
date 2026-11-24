@@ -7,3 +7,8 @@ next-env.d.ts
 *.tsbuildinfo
 .impeccable/review
 .playwright-mcp
+
+# Generated for deployment: holds production secrets, never commit
+dealworkx-crm-hostinger.env
+# Old manual-upload bundle of the source
+dealworkx-crm-upload.zip

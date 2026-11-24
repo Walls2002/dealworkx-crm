@@ -10,6 +10,7 @@ import type { Capacity, LeadRow, Sort } from "@/lib/data";
 import { LEAD_STATUSES } from "@/lib/schema";
 import { withParams, type Params } from "@/lib/url";
 import { cn } from "@/lib/utils";
+import { industryLabel } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -41,7 +42,7 @@ type Props = {
   empty: React.ReactNode;
 };
 
-type ColId = "lead" | "company" | "next" | "due" | "time" | "owner" | "status" | "country" | "zone" | "actions";
+type ColId = "lead" | "company" | "next" | "due" | "time" | "owner" | "status" | "country" | "zone" | "industry" | "actions";
 type Col = { id: ColId; key: Sort | null; label: string; className?: string };
 
 // Console: what is owed and when. Lead List: the old sheet columns.
@@ -49,6 +50,7 @@ const QUEUE: Col[] = [
   { id: "lead", key: "name", label: "Lead" },
   { id: "status", key: "status", label: "Status", className: "hidden lg:table-cell" },
   { id: "company", key: "company", label: "Company", className: "hidden md:table-cell" },
+  { id: "industry", key: null, label: "Industry", className: "hidden 2xl:table-cell" },
   { id: "next", key: null, label: "Next action", className: "hidden lg:table-cell" },
   { id: "due", key: "due", label: "Due" },
   { id: "time", key: null, label: "Their time", className: "hidden xl:table-cell" },
@@ -59,6 +61,7 @@ const LIST: Col[] = [
   { id: "lead", key: "name", label: "Name" },
   { id: "status", key: "status", label: "Lead status" },
   { id: "company", key: "company", label: "Company", className: "hidden md:table-cell" },
+  { id: "industry", key: null, label: "Industry", className: "hidden lg:table-cell" },
   { id: "next", key: null, label: "Current step", className: "hidden lg:table-cell" },
   { id: "country", key: null, label: "Country", className: "hidden md:table-cell" },
   { id: "zone", key: null, label: "Timezone", className: "hidden xl:table-cell" },
@@ -169,6 +172,12 @@ function Cell({ col, r, today, href, first }: { col: Col; r: LeadRow; today: str
       );
     case "status":
       return <TableCell className={cls}><StatusBadge status={r.status} /></TableCell>;
+    case "industry":
+      return (
+        <TableCell className={cn(cls, "max-w-48 truncate")} title={r.industry ? industryLabel(r.industry) : undefined}>
+          {r.industry ? industryLabel(r.industry) : <span className="text-muted-foreground">—</span>}
+        </TableCell>
+      );
     case "country":
       return <TableCell className={cls}>{r.country || <span className="text-muted-foreground">—</span>}</TableCell>;
     case "actions":

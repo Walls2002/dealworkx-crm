@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { CopyCheck, Gauge, Inbox, Upload, Users } from "lucide-react";
 import { requireUser } from "@/lib/auth";
-import { capacity, filterOptions, getLead, duplicateCount, listLeads, listPainPoints, listUsers, PAGE_SIZE, pageSizeOf, SORTS, viewCounts, type Sort } from "@/lib/data";
+import { capacity, filterOptions, getLead, zoneOptions, cityOptions, duplicateCount, listLeads, listPainPoints, listUsers, PAGE_SIZE, pageSizeOf, SORTS, viewCounts, type Sort } from "@/lib/data";
 import { LEAD_STATUSES } from "@/lib/schema";
 import { first, withParams, type Params } from "@/lib/url";
 import { clampPage } from "@/lib/paging";
@@ -27,13 +27,15 @@ export default async function LeadListPage({ searchParams }: { searchParams: Pro
   const status = (LEAD_STATUSES as readonly string[]).includes(first(sp.status)) ? first(sp.status) : "";
   const country = first(sp.country).slice(0, 100);
   const zone = first(sp.zone).slice(0, 100);
+  const city = first(sp.city).slice(0, 100);
+  const industry = first(sp.industry).slice(0, 100);
   const leadId = Number(first(sp.lead)) || null;
   const admin = user.role === "admin";
 
-  const params: Params = { q, status, country, zone, sort: sort === "name" ? undefined : sort, dir: dir === "asc" ? undefined : dir, page: page > 1 ? String(page) : undefined, size: size === PAGE_SIZE ? undefined : String(size) };
+  const params: Params = { q, status, country, zone, city, industry, sort: sort === "name" ? undefined : sort, dir: dir === "asc" ? undefined : dir, page: page > 1 ? String(page) : undefined, size: size === PAGE_SIZE ? undefined : String(size) };
 
   const [{ rows, total, today }, users, painPoints, lead, options, cap, counts, dupes] = await Promise.all([
-    listLeads(user, { view: "unassigned", q, owner: "", status, country, zone, sort, dir, page, size }),
+    listLeads(user, { view: "unassigned", q, owner: "", status, country, zone, city, industry, sort, dir, page, size }),
     listUsers(),
     admin ? listPainPoints() : Promise.resolve([] as string[]),
     leadId ? getLead(user, leadId) : Promise.resolve(null),
@@ -47,7 +49,10 @@ export default async function LeadListPage({ searchParams }: { searchParams: Pro
   const ids = rows.map((r) => r.id);
   const at = lead ? ids.indexOf(lead.id) : -1;
   const nextId = lead ? (at >= 0 ? ids[at + 1] : ids.find((id) => id !== lead.id)) : undefined;
-  const filtered = Boolean(q || status || country || zone);
+  const filtered = Boolean(q || status || country || zone || city || industry);
+  const zones = zoneOptions(options.zones, country);
+  // Hundreds of cities per country, so the city list is offered only once a country narrows it.
+  const cities = country ? cityOptions(options.cities, country, zone) : [];
   const startedToday = admin ? Object.values(cap.used).reduce((n, v) => n + v, 0) : cap.used[user.id] ?? 0;
 
   return (
@@ -57,10 +62,16 @@ export default async function LeadListPage({ searchParams }: { searchParams: Pro
         right={
           <>
             {options.countries.length > 0 && (
-              <FilterSelect name="country" label="Country" value={country} any="All countries" options={options.countries.map((c) => ({ value: c, label: c }))} />
+              <FilterSelect name="country" label="Country" value={country} any="All countries" options={options.countries.map((c) => ({ value: c, label: c }))} clears={["zone", "city"]} />
             )}
-            {options.zones.length > 0 && (
-              <FilterSelect name="zone" label="Timezone" value={zone} any="All timezones" options={options.zones.map((z) => ({ value: z, label: z.replaceAll("_", " ") }))} />
+            {zones.length > 0 && (
+              <FilterSelect name="zone" label="Timezone" value={zone} any={country ? `All ${country} timezones` : "All timezones"} options={zones} clears={["city"]} />
+            )}
+            {(cities.length > 0 || city) && (
+              <FilterSelect name="city" label="City" value={city} any="All cities" options={cities} />
+            )}
+            {options.industries.length > 0 && (
+              <FilterSelect name="industry" label="Industry" value={industry} any="All industries" options={options.industries} />
             )}
             {admin && (
               <Button size="sm" className="h-8" asChild><Link href="/import"><Upload /> Upload leads</Link></Button>
@@ -95,7 +106,7 @@ export default async function LeadListPage({ searchParams }: { searchParams: Pro
           <Segments
             label="Lead status"
             items={[{ label: "All", value: "" }, ...LEAD_STATUSES.map((s) => ({ label: s, value: s }))].map(({ label, value }) => ({
-              label, href: withParams({ q, country, zone, size: params.size }, { status: value || undefined }, "/leads"), active: status === value,
+              label, href: withParams({ q, country, zone, city, industry, size: params.size }, { status: value || undefined }, "/leads"), active: status === value,
             }))}
           />
           {!admin && <CapacityNote capacity={cap} ownerId={user.id} ownerName="You" className="text-xs" />}

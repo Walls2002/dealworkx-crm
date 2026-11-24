@@ -26,7 +26,12 @@ On 2026-11-17 the user asked to copy a reference screenshot (a "JV Outreach" CRM
 5. `Pager`: Previous on the left, numbered pages in the middle (active page blue), Next on the right.
 
 ## Lead record
-A right-hand shadcn `Sheet` (`components/lead-sheet.tsx`, up to `max-w-xl`) driven by the `?lead=` parameter.
+A right-hand shadcn `Sheet` (`components/lead-sheet.tsx`) driven by the `?lead=` parameter. Since 2026-11-25 it is wide
+(`max-w-2xl`, then up to 68rem from `lg`) and split into two independently scrolling columns: **doing** on the left
+(identity, phones with copy buttons, links, then one action box with `Tabs` for Log call / Comment / Status / Assign, each
+with its own save button, then the activity timeline) and **knowing** on the right (current step + sequence, details).
+Below `lg` the columns dissolve into one column ordered identity, actions, current step, activity, details. `components/ui/tabs.tsx`
+is Radix Tabs styled like `Segments`; inactive panels stay mounted so drafts survive tab switches.
 
 ## Additions (2026-11-20)
 - **Sidebar** collapses to an icon rail (`collapsible="icon"`): header toggle, Ctrl+B, state kept in the `sidebar_state` cookie, tooltips on every item. Admins get one more item, **Team**, in a separate "Admin" group under the 7 tabs.

@@ -1,7 +1,8 @@
 import "server-only";
 import type { User } from "./auth";
 import { db } from "./db";
-import { iso, todayISO } from "./dates";
+import { addDays, iso, todayISO } from "./dates";
+import { industryLabel } from "./format";
 import { merge } from "./sequence";
 import { CALL_OUTCOMES } from "./schema";
 import { brevoConfigured, senderProblem } from "./brevo";
@@ -31,6 +32,7 @@ export type LeadRow = {
   linkedin: string;
   country: string;
   timezone: string;
+  industry: string;
   ownerId: number | null;
   ownerName: string | null;
   status: string;
@@ -83,7 +85,7 @@ function viewClause(view: View, user: User, params: unknown[], today: string): s
 }
 
 export type LeadQuery = {
-  view: View; q: string; owner: string; status: string; country?: string; zone?: string;
+  view: View; q: string; owner: string; status: string; country?: string; zone?: string; city?: string; industry?: string;
   sort: Sort; dir: "asc" | "desc"; page: number; size?: number;
 };
 
@@ -119,6 +121,14 @@ export async function listLeads(user: User, query: LeadQuery) {
   if (query.zone) {
     params.push(query.zone);
     where.push(`timezone = $${params.length}`);
+  }
+  if (query.city) {
+    params.push(query.city);
+    where.push(`city = $${params.length}`);
+  }
+  if (query.industry) {
+    params.push(query.industry);
+    where.push(`industry = $${params.length}`);
   }
   const dir = query.dir === "desc" ? "desc" : "asc";
   const order = {
@@ -157,6 +167,7 @@ function toLeadRow(r: Record<string, unknown>): LeadRow {
     linkedin: String(r.linkedin_url ?? ""),
     country: String(r.country ?? ""),
     timezone: String(r.timezone ?? ""),
+    industry: String(r.industry ?? ""),
     ownerId: r.owner_id == null ? null : Number(r.owner_id),
     ownerName: (r.owner_name as string) ?? null,
     status: String(r.status),
@@ -193,16 +204,41 @@ export async function viewCounts(user: User): Promise<NavCounts> {
   return { ...(rest as Record<View, number> & { interested: number }), emailRequested: email_requested };
 }
 
-/** Distinct countries and timezones on leads the user can see, for the list filters. */
+/** Distinct countries, timezones and cities on leads the user can see, for the list filters. */
 export async function filterOptions(user: User) {
   const d = await db();
   const params: unknown[] = [];
   const vis = visibility(user, params);
-  const [countries, zones] = await Promise.all([
+  const [countries, zones, cities, industries] = await Promise.all([
     d.query<{ v: string }>(`select distinct country as v from leads where ${vis} and country <> '' order by 1`, params),
-    d.query<{ v: string }>(`select distinct timezone as v from leads where ${vis} and timezone <> '' order by 1`, params),
+    d.query<{ zone: string; country: string }>(`select distinct timezone as zone, country from leads where ${vis} and timezone <> ''`, params),
+    d.query<{ city: string; zone: string; country: string }>(`select distinct city, timezone as zone, country from leads where ${vis} and city <> ''`, params),
+    d.query<{ v: string }>(`select distinct industry as v from leads where ${vis} and industry <> '' order by 1`, params),
   ]);
-  return { countries: countries.map((r) => r.v), zones: zones.map((r) => r.v) };
+  return {
+    countries: countries.map((r) => r.v),
+    industries: industries.map((r) => ({ value: r.v, label: industryLabel(r.v) })),
+    zones: zones.map((r) => ({ zone: r.zone, country: r.country })),
+    cities: cities.map((r) => ({ city: r.city, zone: r.zone, country: r.country })),
+  };
+}
+
+/** City filter options within a country, narrowed to one timezone when one is chosen. */
+export function cityOptions(cities: { city: string; zone: string; country: string }[], country: string, zone = "") {
+  const inScope = cities.filter((c) => c.country === country && (!zone || c.zone === zone));
+  return [...new Set(inScope.map((c) => c.city))].sort((a, b) => a.localeCompare(b)).map((c) => ({ value: c, label: c }));
+}
+
+/** "America/Indiana/Indianapolis" -> "Indianapolis": timezones read as their city. */
+export function zoneCity(zone: string) {
+  return (zone.split("/").pop() ?? zone).replaceAll("_", " ");
+}
+
+/** Timezone filter options, labelled by city and limited to the chosen country (all zones when none is chosen). */
+export function zoneOptions(zones: { zone: string; country: string }[], country = "") {
+  const inCountry = country ? zones.filter((z) => z.country === country) : zones;
+  const unique = [...new Set(inCountry.map((z) => z.zone))];
+  return unique.map((z) => ({ value: z, label: zoneCity(z) })).sort((a, b) => a.label.localeCompare(b.label));
 }
 
 /* ---------- calls: follow-ups and history ---------- */
@@ -566,83 +602,136 @@ export async function getLead(user: User, id: number) {
 }
 export type LeadDetail = NonNullable<Awaited<ReturnType<typeof getLead>>>;
 
-export async function dashboard(user: User, queuePage = 1) {
+export const DASHBOARD_PERIODS = { day: 1, "7d": 7, "30d": 30 } as const;
+export type DashboardPeriod = keyof typeof DASHBOARD_PERIODS;
+export type DashboardQuery = {
+  /** The day the dashboard reads as (YYYY-MM-DD); defaults to today. */
+  date?: string;
+  /** How many days, ending on `date`, the activity numbers cover. */
+  period?: DashboardPeriod;
+  /** Admins only: narrow everything to one owner. */
+  owner?: number | null;
+  country?: string;
+  industry?: string;
+  queuePage?: number;
+};
+
+export async function dashboard(user: User, query: DashboardQuery = {}) {
   const d = await db();
   const today = todayISO();
+  const date = query.date || today;
+  const days = DASHBOARD_PERIODS[query.period ?? "day"];
+  const from = addDays(date, -(days - 1));
   const tz = process.env.APP_TIMEZONE || "Asia/Singapore";
-  // "Today" as a time range, so the activity and step indexes can be used.
-  const dayStart = `($2::date::timestamp at time zone $3)`, dayEnd = `(($2::date + 1)::timestamp at time zone $3)`;
+  const admin = user.role === "admin";
+  const owner = admin && query.owner ? Number(query.owner) : null;
+  const queuePage = Math.max(1, query.queuePage ?? 1);
+
+  // $1 from, $2 to, $3 timezone, $4 today in every query, then the optional lead filters.
+  const base = (): unknown[] => [from, date, tz, today];
+  // The period as a time range, so the activity and step indexes can be used.
+  const rangeStart = `($1::date::timestamp at time zone $3)`, rangeEnd = `(($2::date + 1)::timestamp at time zone $3)`;
+  /** Country / industry conditions on a leads alias, pushing their values onto `p`. */
+  const leadFilter = (p: unknown[], alias = "l") => {
+    const w: string[] = [];
+    if (query.country) { p.push(query.country); w.push(`${alias}.country = $${p.length}`); }
+    if (query.industry) { p.push(query.industry); w.push(`${alias}.industry = $${p.length}`); }
+    return w.length ? ` and ${w.join(" and ")}` : "";
+  };
+  const narrowed = Boolean(query.country || query.industry);
   // Same visibility as the lists: admins see everything, reps their own leads plus the unassigned pool.
-  const scoped = user.role === "admin" ? "true" : `(l.owner_id = ${Number(user.id)} or l.owner_id is null)`;
-  const owned = user.role === "admin" ? "l.owner_id is not null" : `l.owner_id = ${Number(user.id)}`;
-  const activityScope = user.role === "admin" ? "true" : `a.user_id = ${Number(user.id)}`;
+  const scoped = admin ? (owner ? `l.owner_id = ${owner}` : "true") : `(l.owner_id = ${Number(user.id)} or l.owner_id is null)`;
+  const pool = admin ? "true" : `(l.owner_id = ${Number(user.id)} or l.owner_id is null)`;
+  const owned = admin ? (owner ? `l.owner_id = ${owner}` : "l.owner_id is not null") : `l.owner_id = ${Number(user.id)}`;
+  const activityScope = admin ? (owner ? `a.user_id = ${owner}` : "true") : `a.user_id = ${Number(user.id)}`;
   const queueSize = 10;
+
+  const p = { totals: base(), outcomes: base(), reps: base(), queue: base(), count: base(), recent: base() };
+  const f = {
+    totals: leadFilter(p.totals),
+    outcomes: leadFilter(p.outcomes),
+    reps: leadFilter(p.reps, "x"),
+    queue: leadFilter(p.queue),
+    count: leadFilter(p.count),
+    recent: leadFilter(p.recent),
+  };
 
   const [[totals], outcomes, reps, queue, [queueCount], recent] = await Promise.all([
     d.query<Record<string, number>>(
-      `select count(*)::int as visible,
-              count(*) filter (where l.owner_id is not null and l.status = 'Active')::int as active,
-              count(*) filter (where l.next_due = $1 and l.owner_id is not null)::int as due_today,
-              count(*) filter (where l.next_due < $1 and l.owner_id is not null)::int as overdue,
+      `select count(*) filter (where ${scoped})::int as visible,
+              count(*) filter (where ${scoped} and l.owner_id is not null and l.status = 'Active')::int as active,
+              count(*) filter (where ${scoped} and l.owner_id is not null and l.next_due between $1 and $2)::int as due,
+              count(*) filter (where ${scoped} and l.owner_id is not null and l.next_due < $4)::int as overdue,
               count(*) filter (where l.owner_id is null)::int as unassigned,
-              count(*) filter (where l.disposition = 'Meeting booked')::int as meetings
-         from leads l where ${scoped}`,
-      [today],
+              count(*) filter (where ${scoped} and l.disposition = 'Meeting booked')::int as meetings
+         from leads l where ${pool} and $3::text is not null${f.totals}`,
+      p.totals,
     ),
     d.query<{ outcome: string; n: number }>(
-      `select a.outcome, count(*)::int as n from activities a
-        where a.kind = 'call' and a.created_at >= ${dayStart} and a.created_at < ${dayEnd} and ${activityScope} and $1::int is not null
+      `select a.outcome, count(*)::int as n from activities a ${narrowed ? "join leads l on l.id = a.lead_id" : ""}
+        where a.kind = 'call' and a.created_at >= ${rangeStart} and a.created_at < ${rangeEnd} and ${activityScope} and $4::date is not null${f.outcomes}
         group by a.outcome order by n desc`,
-      [1, today, tz],
+      p.outcomes,
     ),
     d.query<Record<string, unknown>>(
       `with owned as (
-         select owner_id, count(*) filter (where status = 'Active')::int as active,
-                count(*) filter (where next_due = $2)::int as due_today, count(*) filter (where next_due < $2)::int as overdue,
-                count(*) filter (where disposition = 'Meeting booked')::int as meetings
-           from leads where owner_id is not null group by owner_id
+         select x.owner_id, count(*) filter (where x.status = 'Active')::int as active,
+                count(*) filter (where x.next_due between $1 and $2)::int as due, count(*) filter (where x.next_due < $4)::int as overdue,
+                count(*) filter (where x.disposition = 'Meeting booked')::int as meetings
+           from leads x where x.owner_id is not null${f.reps} group by x.owner_id
        ), calls as (
-         select user_id, count(*)::int as n from activities where kind = 'call' and created_at >= ${dayStart} and created_at < ${dayEnd} group by user_id
+         select a.user_id, count(*)::int as n from activities a ${narrowed ? "join leads x on x.id = a.lead_id" : ""}
+          where a.kind = 'call' and a.created_at >= ${rangeStart} and a.created_at < ${rangeEnd}${f.reps} group by a.user_id
        ), steps as (
-         select sent_by, count(*)::int as n from lead_steps where sent_at >= ${dayStart} and sent_at < ${dayEnd} group by sent_by
+         select s.sent_by, count(*)::int as n from lead_steps s ${narrowed ? "join leads x on x.id = s.lead_id" : ""}
+          where s.sent_at >= ${rangeStart} and s.sent_at < ${rangeEnd}${f.reps} group by s.sent_by
        )
-       select u.id, u.name, u.role, coalesce(o.active, 0) as active, coalesce(o.due_today, 0) as due_today, coalesce(o.overdue, 0) as overdue,
-              coalesce(o.meetings, 0) as meetings, coalesce(c.n, 0) as calls_today, coalesce(s.n, 0) as steps_today
+       select u.id, u.name, u.role, coalesce(o.active, 0) as active, coalesce(o.due, 0) as due, coalesce(o.overdue, 0) as overdue,
+              coalesce(o.meetings, 0) as meetings, coalesce(c.n, 0) as calls, coalesce(s.n, 0) as steps
          from users u
          left join owned o on o.owner_id = u.id
          left join calls c on c.user_id = u.id
          left join steps s on s.sent_by = u.id
-        where $1::int is not null and u.password_hash <> '' ${user.role === "admin" ? "" : `and u.id = ${Number(user.id)}`}
+        where u.password_hash <> '' ${admin ? (owner ? `and u.id = ${owner}` : "") : `and u.id = ${Number(user.id)}`}
         order by u.name`,
-      [1, today, tz],
+      p.reps,
     ),
-    // Due and overdue leads, oldest first: the old dashboard's queue, paged.
+    // Due and overdue leads as of the chosen date, oldest first: the old dashboard's queue, paged.
     d.query<Record<string, unknown>>(
       `with ${NEXT_ACTION_CTE}
-       select * from enriched l where ${owned} and l.next_due <= $1
-        order by l.next_due, l.last_name limit ${queueSize} offset ${(Math.max(1, queuePage) - 1) * queueSize}`,
-      [today],
+       select * from enriched l where ${owned} and l.next_due <= $2 and $1::date is not null and $3::text is not null and $4::date is not null${f.queue}
+        order by l.next_due, l.last_name limit ${queueSize} offset ${(queuePage - 1) * queueSize}`,
+      p.queue,
     ),
-    d.query<{ total: number }>(`select count(*)::int as total from leads l where ${owned} and l.next_due <= $1`, [today]),
+    d.query<{ total: number }>(
+      `select count(*)::int as total from leads l
+        where ${owned} and l.next_due <= $2 and $1::date is not null and $3::text is not null and $4::date is not null${f.count}`,
+      p.count,
+    ),
     d.query<Record<string, unknown>>(
       `select a.id, a.kind, a.outcome, a.body, a.created_at, a.lead_id, u.name as user_name,
               l.first_name || ' ' || l.last_name as lead_name, l.company
          from activities a join leads l on l.id = a.lead_id left join users u on u.id = a.user_id
         where a.kind in ('call', 'step', 'note', 'email') and ${activityScope}
+          and a.created_at >= ${rangeStart} and a.created_at < ${rangeEnd} and $4::date is not null${f.recent}
         order by a.created_at desc limit 7`,
+      p.recent,
     ),
   ]);
   return {
     today,
+    date,
+    from,
+    days,
     totals,
     outcomes,
-    callsToday: outcomes.reduce((n, o) => n + o.n, 0),
+    calls: outcomes.reduce((n, o) => n + o.n, 0),
     queue: queue.map(toLeadRow),
     queueTotal: queueCount.total,
     queueSize,
     reps: reps.map((r) => ({
-      id: Number(r.id), name: String(r.name), role: String(r.role), active: Number(r.active), dueToday: Number(r.due_today),
-      overdue: Number(r.overdue), callsToday: Number(r.calls_today), stepsToday: Number(r.steps_today), meetings: Number(r.meetings),
+      id: Number(r.id), name: String(r.name), role: String(r.role), active: Number(r.active), due: Number(r.due),
+      overdue: Number(r.overdue), calls: Number(r.calls), steps: Number(r.steps), meetings: Number(r.meetings),
     })),
     recent: recent.map((r) => ({
       id: Number(r.id), kind: String(r.kind), outcome: String(r.outcome ?? ""), body: String(r.body ?? ""),

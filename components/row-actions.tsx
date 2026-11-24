@@ -7,11 +7,8 @@ import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { LinkedInIcon } from "./icons";
+import { telHref } from "@/lib/phone";
 
-function tel(n: string) {
-  const digits = n.replace(/[^+\d]/g, "").replace(/^00/, "+");
-  return /^\+?\d{7,15}$/.test(digits) ? `tel:${digits}` : null;
-}
 function gmail(email: string) {
   return `https://mail.google.com/mail/?${new URLSearchParams({ view: "cm", fs: "1", to: email })}`;
 }
@@ -28,7 +25,7 @@ function web(url: string) {
 export function RowActions({ name, detailsHref, leadId, phone, email, linkedin }: {
   name: string; detailsHref: string; leadId: number; phone?: string; email?: string; linkedin?: string;
 }) {
-  const call = phone ? tel(phone) : null;
+  const call = phone ? telHref(phone) : null;
   const li = linkedin ? web(linkedin) : null;
   return (
     <div className="flex items-center justify-end gap-1">

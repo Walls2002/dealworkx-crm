@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { AlarmClock, ArrowRight, CalendarCheck, ChevronDown, UserPlus } from "lucide-react";
 import { requireUser } from "@/lib/auth";
-import { capacity, filterOptions, getLead, listLeads, listPainPoints, listUsers, PAGE_SIZE, pageSizeOf, SORTS, viewCounts, VIEWS, type Sort, type View } from "@/lib/data";
+import { capacity, filterOptions, getLead, listLeads, zoneOptions, listPainPoints, listUsers, PAGE_SIZE, pageSizeOf, SORTS, viewCounts, VIEWS, type Sort, type View } from "@/lib/data";
 import { first, withParams, type Params } from "@/lib/url";
 import { clampPage } from "@/lib/paging";
 import { Button } from "@/components/ui/button";
@@ -49,17 +49,18 @@ export default async function ConsolePage({ searchParams }: { searchParams: Prom
   const q = first(sp.q).slice(0, 100);
   const owner = first(sp.owner);
   const zone = first(sp.zone).slice(0, 100);
+  const industry = first(sp.industry).slice(0, 100);
   const leadId = Number(first(sp.lead)) || null;
   const admin = user.role === "admin";
 
   const params: Params = {
-    view: view === "today" ? undefined : view, q, owner, zone,
+    view: view === "today" ? undefined : view, q, owner, zone, industry,
     sort: sort === "due" ? undefined : sort, dir: dir === "asc" ? undefined : dir, page: page > 1 ? String(page) : undefined,
     size: size === PAGE_SIZE ? undefined : String(size),
   };
 
   const [{ rows, total, today }, users, painPoints, lead, options, cap, counts] = await Promise.all([
-    listLeads(user, { view, q, owner, status: "", zone, sort, dir, page, size }),
+    listLeads(user, { view, q, owner, status: "", zone, industry, sort, dir, page, size }),
     listUsers(),
     admin ? listPainPoints() : Promise.resolve([] as string[]),
     leadId ? getLead(user, leadId) : Promise.resolve(null),
@@ -76,8 +77,8 @@ export default async function ConsolePage({ searchParams }: { searchParams: Prom
   const at = lead ? ids.indexOf(lead.id) : -1;
   const nextId = lead ? (at >= 0 ? ids[at + 1] : ids.find((id) => id !== lead.id)) : ids[0];
   const position = lead && at >= 0 ? `${TASKS[view]} · ${((page - 1) * size + at + 1).toLocaleString("en-US")} of ${total.toLocaleString("en-US")}` : TASKS[view];
-  const filtered = Boolean(q || owner || zone);
-  const segHref = (v: View) => withParams({ q, owner, zone, size: params.size }, { view: v === "today" ? undefined : v });
+  const filtered = Boolean(q || owner || zone || industry);
+  const segHref = (v: View) => withParams({ q, owner, zone, industry, size: params.size }, { view: v === "today" ? undefined : v });
 
   return (
     <Page>
@@ -89,7 +90,10 @@ export default async function ConsolePage({ searchParams }: { searchParams: Prom
               <FilterSelect name="owner" label="Owner" value={owner} any="All owners" options={[{ value: "none", label: "Unassigned" }, ...people.map((u) => ({ value: String(u.id), label: u.name }))]} />
             )}
             {options.zones.length > 0 && (
-              <FilterSelect name="zone" label="Timezone" value={zone} any="All timezones" options={options.zones.map((z) => ({ value: z, label: z.replaceAll("_", " ") }))} />
+              <FilterSelect name="zone" label="Timezone" value={zone} any="All timezones" options={zoneOptions(options.zones)} />
+            )}
+            {options.industries.length > 0 && (
+              <FilterSelect name="industry" label="Industry" value={industry} any="All industries" options={options.industries} />
             )}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>

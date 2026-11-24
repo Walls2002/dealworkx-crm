@@ -31,7 +31,7 @@ function Field({ label, htmlFor, children, className }: { label: string; htmlFor
   );
 }
 
-export function CopyButton({ text, label }: { text: string; label: string }) {
+export function CopyButton({ text, label, iconOnly = false, className }: { text: string; label: string; iconOnly?: boolean; className?: string }) {
   const [copied, setCopied] = useState(false);
   useEffect(() => {
     if (!copied) return;
@@ -41,8 +41,11 @@ export function CopyButton({ text, label }: { text: string; label: string }) {
   return (
     <Button
       type="button"
-      variant="outline"
-      size="sm"
+      variant={iconOnly ? "ghost" : "outline"}
+      size={iconOnly ? "icon-sm" : "sm"}
+      className={className}
+      title={iconOnly ? (copied ? "Copied" : label) : undefined}
+      aria-label={iconOnly ? label : undefined}
       onClick={async () => {
         try {
           await navigator.clipboard.writeText(text);
@@ -52,8 +55,8 @@ export function CopyButton({ text, label }: { text: string; label: string }) {
         }
       }}
     >
-      {copied ? <Check /> : <Copy />}
-      <span aria-live="polite">{copied ? "Copied" : label}</span>
+      {copied ? <Check className={iconOnly ? "text-green-700" : undefined} /> : <Copy />}
+      <span aria-live="polite" className={iconOnly ? "sr-only" : undefined}>{copied ? "Copied" : label}</span>
     </Button>
   );
 }
@@ -117,9 +120,9 @@ export function NoteForm({ leadId }: { leadId: number }) {
     <form ref={form} action={action} className="grid gap-2">
       <input type="hidden" name="leadId" value={leadId} />
       <Label htmlFor={`note-${leadId}`} className="sr-only">Add a comment</Label>
-      <Textarea id={`note-${leadId}`} name="body" rows={2} maxLength={4000} placeholder="Add a comment for the team" required />
+      <Textarea id={`note-${leadId}`} name="body" rows={3} maxLength={4000} placeholder="Add a comment for the team" required />
       <div className="flex flex-wrap items-center gap-3">
-        <Button variant="outline" size="sm" disabled={pending}>{pending ? "Saving…" : "Save comment"}</Button>
+        <Button disabled={pending}>{pending ? "Saving…" : "Save comment"}</Button>
         <Status state={state} />
       </div>
     </form>
@@ -141,7 +144,7 @@ export function toastOnSuccess(fn: (prev: FormState, form: FormData) => Promise<
 export function LeadSettingsForm({ leadId, status, disposition, channelPlan }: { leadId: number; status: string; disposition: string; channelPlan: string }) {
   const [state, action, pending] = useActionState<FormState, FormData>(toastOnSuccess(updateLeadSettings), null);
   return (
-    <form action={action} className="grid gap-4 sm:grid-cols-2">
+    <form action={action} className="grid gap-4 sm:grid-cols-3">
       <input type="hidden" name="leadId" value={leadId} />
       <Field label="Lead status" htmlFor={`st-${leadId}`}>
         <NativeSelect id={`st-${leadId}`} name="status" className="w-full" defaultValue={status}>
@@ -158,8 +161,8 @@ export function LeadSettingsForm({ leadId, status, disposition, channelPlan }: {
           {CHANNEL_PLANS.map((s) => <NativeSelectOption key={s}>{s}</NativeSelectOption>)}
         </NativeSelect>
       </Field>
-      <div className="flex flex-wrap items-center gap-3 sm:col-span-2">
-        <Button variant="outline" disabled={pending}>{pending ? "Saving…" : "Save status"}</Button>
+      <div className="flex flex-wrap items-center gap-3 sm:col-span-3">
+        <Button disabled={pending}>{pending ? "Saving…" : "Save status"}</Button>
         {state?.error && <Status state={state} />}
       </div>
     </form>

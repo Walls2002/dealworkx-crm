@@ -140,6 +140,8 @@ create index if not exists leads_activated_idx on leads(activated_on);
 create index if not exists leads_status_idx on leads(status);
 create index if not exists leads_country_idx on leads(country);
 create index if not exists leads_timezone_idx on leads(timezone);
+create index if not exists leads_city_idx on leads(country, city);
+create index if not exists leads_industry_idx on leads(industry);
 create index if not exists leads_last_call_idx on leads(last_call_outcome, last_call_at desc);
 create index if not exists activities_calls_idx on activities(created_at desc, id desc) where kind = 'call';
 create index if not exists lead_steps_sent_idx on lead_steps(sent_at) where sent_at is not null;
